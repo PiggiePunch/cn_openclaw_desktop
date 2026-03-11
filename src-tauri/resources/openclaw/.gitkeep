@@ -1,0 +1,3 @@
+# 此目录用于存放 OpenClaw 源码
+# 构建时自动下载，不提交到 git
+# 运行 pnpm install 会自动下载

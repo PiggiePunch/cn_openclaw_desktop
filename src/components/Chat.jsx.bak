@@ -1,0 +1,652 @@
+import React, { useState, useEffect, useRef } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+
+// 默认模型配置
+const DEFAULT_MODELS = {
+  qwen: [
+    { id: 'qwen-plus', name: 'qwen-plus', context: 128000 },
+    { id: 'qwen-turbo', name: 'qwen-turbo', context: 8000 },
+    { id: 'qwen-max', name: 'qwen-max', context: 32000 },
+    { id: 'qwen-long', name: 'qwen-long', context: 1000000 }
+  ],
+  deepseek: [
+    { id: 'deepseek-chat', name: 'deepseek-chat', context: 128000 },
+    { id: 'deepseek-coder', name: 'deepseek-coder', context: 128000 }
+  ],
+  ernie: [
+    { id: 'ernie-bot', name: 'ernie-bot', context: 128000 },
+    { id: 'ernie-bot-turbo', name: 'ernie-bot-turbo', context: 128000 },
+    { id: 'ernie-bot-4', name: 'ernie-bot-4', context: 128000 }
+  ],
+  zhipu: [
+    { id: 'glm-4', name: 'glm-4', context: 128000 },
+    { id: 'glm-4-flash', name: 'glm-4-flash', context: 128000 },
+    { id: 'glm-4-plus', name: 'glm-4-plus', context: 128000 }
+  ],
+  moonshot: [
+    { id: 'moonshot-v1-128k', name: 'moonshot-v1-128k', context: 128000 },
+    { id: 'moonshot-v1-32k', name: 'moonshot-v1-32k', context: 32000 }
+  ],
+  doubao: [
+    { id: 'doubao-pro-256k', name: 'doubao-pro-256k', context: 256000 },
+    { id: 'doubao-pro-32k', name: 'doubao-pro-32k', context: 32000 }
+  ]
+}
+
+// 提供商基础信息
+const AI_PROVIDERS_BASE = [
+  { id: 'qwen', name: '通义千问', icon: '🟠' },
+  { id: 'deepseek', name: 'DeepSeek', icon: '🔵' },
+  { id: 'ernie', name: '文心一言', icon: '🔴' },
+  { id: 'zhipu', name: '智谱 GLM', icon: '🟣' },
+  { id: 'moonshot', name: '月之暗面', icon: '🌙' },
+  { id: 'doubao', name: '豆包', icon: '🟤' },
+]
+
+// 合并默认模型和自定义模型
+function mergeModels(providerId, customModels = []) {
+  const defaults = DEFAULT_MODELS[providerId] || []
+  const existingIds = new Set(defaults.map(m => m.id))
+  const custom = customModels
+    .filter(name => !existingIds.has(name))
+    .map(name => ({
+      id: name,
+      name: name,
+      context: 128000 // 默认上下文
+    }))
+  return [...defaults, ...custom]
+}
+
+// 估算 token 数量（简化版：中文约 1.5 字符 = 1 token，英文约 4 字符 = 1 token）
+function estimateTokens(text) {
+  if (!text) return 0
+  // 使用字符串方法匹配中文字符范围
+  let chineseCount = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code >= 0x4e00 && code <= 0x9fa5) {
+      chineseCount++
+    }
+  }
+  const otherChars = text.length - chineseCount
+  return Math.ceil(chineseCount / 1.5 + otherChars / 4)
+}
+
+// 估算消息列表的总 token 数
+function estimateMessagesTokens(messages) {
+  return messages.reduce((total, msg) => total + estimateTokens(msg.content), 0)
+}
+
+// 格式化数字显示
+function formatNumber(num) {
+  if (num >= 10000) {
+    return (num / 10000).toFixed(1) + 'w'
+  }
+  if (num >= 1000) {
+    return (num / 1000).toFixed(1) + 'k'
+  }
+  return num.toString()
+}
+
+export default function Chat() {
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [isLoading, setIsLoading] = useState(false)
+  const [selectedProvider, setSelectedProvider] = useState('qwen')
+  const [selectedModel, setSelectedModel] = useState('qwen-plus')
+  const [customModel, setCustomModel] = useState('')
+  const [useCustomModel, setUseCustomModel] = useState(false)
+  const [sessions, setSessions] = useState([])
+  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [config, setConfig] = useState(null)
+  const [aiProviders, setAiProviders] = useState([])
+  const [showMemoryPanel, setShowMemoryPanel] = useState(false)
+  const [memories, setMemories] = useState([])
+  const [agents, setAgents] = useState([])
+  const [selectedAgent, setSelectedAgent] = useState(null)
+  const messagesEndRef = useRef(null)
+
+  // 加载配置和构建模型列表
+  useEffect(() => {
+    const loadConfig = async () => {
+      try {
+        const cfg = await invoke('get_config')
+        setConfig(cfg)
+
+        // 构建包含自定义模型的提供商列表
+        const providers = AI_PROVIDERS_BASE.map(provider => {
+          const providerConfig = cfg?.ai_provider?.[provider.id]
+          const customModels = providerConfig?.custom_models || []
+          return {
+            ...provider,
+            models: mergeModels(provider.id, customModels)
+          }
+        })
+        setAiProviders(providers)
+
+        // 加载 Agents 列表
+        const agentsList = await invoke('list_agents')
+        setAgents(agentsList)
+        if (agentsList.length > 0 && !selectedAgent) {
+          setSelectedAgent(agentsList[0])
+        }
+      } catch (error) {
+        console.error('加载配置失败:', error)
+        // 使用默认配置
+        const providers = AI_PROVIDERS_BASE.map(provider => ({
+          ...provider,
+          models: DEFAULT_MODELS[provider.id] || []
+        }))
+        setAiProviders(providers)
+      }
+    }
+    loadConfig()
+  }, [])
+
+  // 加载保存的模型选择
+  useEffect(() => {
+    const savedProvider = localStorage.getItem('chat_provider') || 'qwen'
+    const savedModel = localStorage.getItem('chat_model') || 'qwen-plus'
+    const savedUseCustom = localStorage.getItem('chat_use_custom_model') === 'true'
+    const savedCustomModel = localStorage.getItem('chat_custom_model') || ''
+
+    setSelectedProvider(savedProvider)
+    setSelectedModel(savedModel)
+    setUseCustomModel(savedUseCustom)
+    setCustomModel(savedCustomModel)
+  }, [])
+
+  // 保存模型选择（包括自定义模型状态）
+  useEffect(() => {
+    localStorage.setItem('chat_provider', selectedProvider)
+    localStorage.setItem('chat_model', selectedModel)
+    localStorage.setItem('chat_use_custom_model', String(useCustomModel))
+    localStorage.setItem('chat_custom_model', customModel)
+    if (selectedAgent) {
+      localStorage.setItem('chat_agent', selectedAgent.id)
+    }
+  }, [selectedProvider, selectedModel, useCustomModel, customModel, selectedAgent])
+
+  // 加载会话列表
+  useEffect(() => {
+    loadSessions()
+  }, [])
+
+  // 自动滚动到底部
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const loadSessions = async () => {
+    try {
+      const result = await invoke('list_sessions')
+      setSessions(result)
+      if (result.length > 0 && !currentSessionId) {
+        loadSession(result[0].id)
+      }
+    } catch (error) {
+      console.error('加载会话失败:', error)
+    }
+  }
+
+  const loadSession = async (sessionId) => {
+    try {
+      const session = await invoke('get_session', { sessionId })
+      setMessages(session.messages || [])
+      setCurrentSessionId(sessionId)
+    } catch (error) {
+      console.error('加载会话详情失败:', error)
+    }
+  }
+
+  const createNewSession = async () => {
+    try {
+      const session = await invoke('create_session', {
+        title: '新对话 ' + new Date().toLocaleString()
+      })
+      await loadSessions()
+      loadSession(session.id)
+    } catch (error) {
+      console.error('创建会话失败:', error)
+    }
+  }
+
+  const deleteSession = async (sessionId) => {
+    try {
+      await invoke('delete_session', { sessionId })
+      await loadSessions()
+      if (currentSessionId === sessionId) {
+        setMessages([])
+        setCurrentSessionId(null)
+      }
+    } catch (error) {
+      console.error('删除会话失败:', error)
+    }
+  }
+
+  const loadMemories = async () => {
+    try {
+      const result = await invoke('list_memories')
+      setMemories(result)
+    } catch (error) {
+      console.error('加载记忆失败:', error)
+    }
+  }
+
+  const insertMemory = (memoryContent) => {
+    setInput(prev => prev + `\n\n[记忆引用: ${memoryContent.slice(0, 50)}...]`)
+    setShowMemoryPanel(false)
+  }
+
+  const sendMessage = async () => {
+    if (!input.trim() || isLoading) return
+
+    // 加载启用的 Skills
+    const getEnabledSkills = () => {
+      try {
+        const savedState = localStorage.getItem('skills_enabled_state')
+        if (savedState) {
+          const enabledMap = JSON.parse(savedState)
+          const BUILTIN_SKILLS = [
+            { id: 'coding-agent', name: '编程助手', description: '代码编写、调试、解释' },
+            { id: 'web-search', name: '网页搜索', description: '搜索网络信息' },
+            { id: 'file-manager', name: '文件管理', description: '文件读写、目录操作' },
+            { id: 'browser-control', name: '浏览器控制', description: '自动化浏览器操作' },
+            { id: 'schedule', name: '定时任务', description: '创建和管理定时任务' },
+            { id: 'wechat-helper', name: '微信助手', description: '微信消息自动回复' },
+            { id: 'email-helper', name: '邮件助手', description: '邮件起草、发送' },
+            { id: 'note-taking', name: '笔记助手', description: '笔记整理、知识管理' },
+            { id: 'translator', name: '翻译助手', description: '多语言翻译' },
+            { id: 'code-reviewer', name: '代码审查', description: '审查代码质量' },
+          ]
+          return BUILTIN_SKILLS.filter(s => enabledMap[s.id])
+        }
+      } catch (e) {
+        console.warn('加载 Skills 失败:', e)
+      }
+      return []
+    }
+
+    const enabledSkills = getEnabledSkills()
+
+    // 构建带有 Skills 上下文的消息
+    let finalContent = input.trim()
+    if (enabledSkills.length > 0) {
+      const skillsPrompt = `\n\n[启用的技能: ${enabledSkills.map(s => s.name).join(', ')}]`
+      finalContent += skillsPrompt
+    }
+
+    const userMessage = { role: 'user', content: finalContent }
+    const newMessages = [...messages, { role: 'user', content: input.trim() }]  // 保存原始消息
+    setMessages(newMessages)
+    setInput('')
+    setIsLoading(true)
+
+    // 如果没有会话，创建一个
+    let sessionId = currentSessionId
+    if (!sessionId) {
+      const session = await invoke('create_session', {
+        title: input.slice(0, 30) + (input.length > 30 ? '...' : '')
+      })
+      sessionId = session.id
+      setCurrentSessionId(sessionId)
+      await loadSessions()
+    }
+
+    // 保存用户消息（原始内容）
+    await invoke('save_message', { sessionId, message: { role: 'user', content: input.trim() } })
+
+    try {
+      // 根据提供商调用对应命令
+      const commandMap = {
+        qwen: 'chat_with_qwen',
+        deepseek: 'chat_with_deepseek',
+        ernie: 'chat_with_ernie',
+        zhipu: 'chat_with_zhipu',
+        moonshot: 'chat_with_moonshot',
+        doubao: 'chat_with_doubao'
+      }
+
+      const command = commandMap[selectedProvider]
+      const response = await invoke(command, {
+        model: selectedModel,
+        messages: newMessages
+      })
+
+      const assistantMessage = { role: 'assistant', content: response.content }
+      const finalMessages = [...newMessages, assistantMessage]
+      setMessages(finalMessages)
+
+      // 保存助手消息
+      await invoke('save_message', { sessionId, message: assistantMessage })
+    } catch (error) {
+      setMessages([...newMessages, { role: 'assistant', content: '❌ ' + error }])
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage()
+    }
+  }
+
+  const currentProvider = aiProviders.find(p => p.id === selectedProvider)
+  const currentModelInfo = currentProvider?.models.find(m => m.id === selectedModel)
+  const currentTokens = estimateMessagesTokens(messages)
+  const maxTokens = currentModelInfo?.context || 128000
+  const tokenPercentage = Math.min((currentTokens / maxTokens) * 100, 100)
+
+  return (
+    <div className="h-full flex">
+      {/* 会话列表侧边栏 */}
+      <div className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col">
+        <div className="p-4 border-b border-gray-200">
+          <button onClick={createNewSession} className="w-full button py-2">
+            + 新建对话
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-2 space-y-2">
+          {sessions.map(session => (
+            <div
+              key={session.id}
+              onClick={() => loadSession(session.id)}
+              className={`p-3 rounded-lg cursor-pointer transition-colors ${
+                currentSessionId === session.id
+                  ? 'bg-primary-100 text-primary-900'
+                  : 'hover:bg-gray-100'
+              }`}
+            >
+              <div className="font-medium text-sm truncate">{session.title}</div>
+              <div className="text-xs text-gray-500 mt-1">
+                {new Date(session.updated_at).toLocaleString()}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 聊天区域 */}
+      <div className="flex-1 flex flex-col bg-white">
+        {/* 顶部工具栏 */}
+        <div className="p-4 border-b border-gray-200">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              {/* 提供商选择 */}
+              <button
+                onClick={() => setShowSettings(!showSettings)}
+                className="px-3 py-2 rounded-lg hover:bg-gray-100 flex items-center gap-2"
+              >
+                <span>{currentProvider?.icon}</span>
+                <span className="font-medium">{currentProvider?.name}</span>
+                <span className="text-gray-400">▼</span>
+              </button>
+              <span className="text-gray-300">|</span>
+              {/* Agent 选择 */}
+              {agents.length > 0 && (
+                <>
+                  <select
+                    value={selectedAgent?.id || ''}
+                    onChange={(e) => setSelectedAgent(agents.find(a => a.id === e.target.value) || null)}
+                    className="border-0 bg-transparent font-medium text-gray-700 focus:ring-0 cursor-pointer"
+                  >
+                    {agents.map(agent => (
+                      <option key={agent.id} value={agent.id}>{agent.avatar} {agent.name}</option>
+                    ))}
+                  </select>
+                  <span className="text-gray-300">|</span>
+                </>
+              )}
+              {/* 模型选择 */}
+              {!useCustomModel ? (
+                <select
+                  value={selectedModel}
+                  onChange={(e) => {
+                    if (e.target.value === '__custom__') {
+                      setUseCustomModel(true)
+                    } else {
+                      setSelectedModel(e.target.value)
+                    }
+                  }}
+                  className="border-0 bg-transparent font-medium text-gray-700 focus:ring-0 cursor-pointer"
+                >
+                  {currentProvider?.models.map(model => (
+                    <option key={model.id} value={model.id}>{model.name}</option>
+                  ))}
+                  <option value="__custom__">✏️ 自定义...</option>
+                </select>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={customModel}
+                    onChange={(e) => {
+                      setCustomModel(e.target.value)
+                      setSelectedModel(e.target.value)
+                    }}
+                    placeholder="输入自定义模型名称"
+                    className="border border-gray-300 rounded px-2 py-1 text-sm focus:ring-2 focus:ring-primary-500"
+                    onBlur={() => {
+                      if (!customModel) {
+                        setUseCustomModel(false)
+                        setSelectedModel(currentProvider?.models[0]?.id || 'default')
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      setUseCustomModel(false)
+                      setCustomModel('')
+                      setSelectedModel(currentProvider?.models[0]?.id || 'default')
+                    }}
+                    className="text-gray-400 hover:text-gray-600"
+                    title="取消自定义"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={() => currentSessionId && deleteSession(currentSessionId)}
+            className="text-gray-400 hover:text-red-500"
+            disabled={!currentSessionId}
+          >
+            🗑️ 删除对话
+          </button>
+        </div>
+
+        {/* Token 使用显示 */}
+        {messages.length > 0 && (
+          <div className="px-4 pb-3 flex items-center gap-4 text-sm">
+            <div className="flex items-center gap-2 flex-1">
+              <span className="text-gray-500">上下文:</span>
+              <div className="flex-1 max-w-md">
+                <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-colors ${
+                      tokenPercentage > 90
+                        ? 'bg-red-500'
+                        : tokenPercentage > 70
+                          ? 'bg-yellow-500'
+                          : 'bg-green-500'
+                    }`}
+                    style={{ width: `${tokenPercentage}%` }}
+                  />
+                </div>
+              </div>
+              <span className={`font-medium ${
+                tokenPercentage > 90
+                  ? 'text-red-600'
+                  : tokenPercentage > 70
+                    ? 'text-yellow-600'
+                    : 'text-gray-700'
+              }`}>
+                {formatNumber(currentTokens)} / {formatNumber(maxTokens)} tokens
+                ({tokenPercentage.toFixed(1)}%)
+              </span>
+            </div>
+            {currentModelInfo && (
+              <div className="text-gray-500">
+                {messages.length} 条消息 · {currentModelInfo.name}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 模型选择面板 */}
+        {showSettings && (
+          <div className="p-4 bg-gray-50 border-b border-gray-200">
+            <div className="grid grid-cols-3 gap-3">
+              {aiProviders.map(provider => (
+                <button
+                  key={provider.id}
+                  onClick={() => {
+                    setSelectedProvider(provider.id)
+                    setSelectedModel(provider.models[0]?.id || 'default')
+                    setShowSettings(false)
+                  }}
+                  className={`p-3 rounded-lg text-center transition-colors ${
+                    selectedProvider === provider.id
+                      ? 'bg-primary-100 text-primary-900 ring-2 ring-primary-500'
+                      : 'bg-white hover:bg-gray-100'
+                  }`}
+                >
+                  <div className="text-2xl mb-1">{provider.icon}</div>
+                  <div className="text-sm font-medium">{provider.name}</div>
+                  <div className="text-xs text-gray-500 mt-1">
+                    {provider.models.length} 个模型
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 消息列表 */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          {messages.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-400">
+              <div className="text-6xl mb-4">💬</div>
+              <div className="text-xl mb-2">开始新对话</div>
+              <div className="text-sm">选择 AI 模型，输入你的问题</div>
+            </div>
+          ) : (
+            messages.map((msg, idx) => (
+              <div
+                key={idx}
+                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-3xl rounded-2xl px-5 py-3 ${
+                    msg.role === 'user'
+                      ? 'bg-primary-600 text-white'
+                      : 'bg-gray-100 text-gray-900'
+                  }`}
+                >
+                  <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+                </div>
+              </div>
+            ))
+          )}
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="bg-gray-100 rounded-2xl px-5 py-3 text-gray-500">
+                <div className="flex gap-1">
+                  <span className="animate-bounce">●</span>
+                  <span className="animate-bounce" style={{ animationDelay: '0.1s' }}>●</span>
+                  <span className="animate-bounce" style={{ animationDelay: '0.2s' }}>●</span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* 输入区域 */}
+        <div className="p-4 border-t border-gray-200">
+          {/* 记忆引用按钮 */}
+          {showMemoryPanel && (
+            <div className="mb-4 p-4 bg-gray-50 rounded-xl border">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-medium text-gray-900">📝 选择记忆引用</h3>
+                <button
+                  onClick={() => setShowMemoryPanel(false)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
+                {memories.length === 0 ? (
+                  <div className="col-span-2 text-center py-4 text-gray-500 text-sm">
+                    暂无记忆文件，前往「记忆管理」创建
+                  </div>
+                ) : (
+                  memories.map(memory => (
+                    <button
+                      key={memory.id}
+                      onClick={() => insertMemory(memory.content)}
+                      className="p-3 text-left bg-white border rounded-lg hover:border-primary-300 transition-colors"
+                    >
+                      <div className="font-medium text-sm truncate">{memory.title}</div>
+                      <div className="text-xs text-gray-500 truncate mt-1">
+                        {memory.content.slice(0, 60)}...
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-3 items-end max-w-4xl mx-auto">
+            {/* 记忆按钮 */}
+            <button
+              onClick={async () => {
+                if (showMemoryPanel) {
+                  setShowMemoryPanel(false)
+                } else {
+                  await loadMemories()
+                  setShowMemoryPanel(true)
+                }
+              }}
+              className={`px-4 py-3 rounded-xl border transition-colors ${
+                showMemoryPanel
+                  ? 'bg-primary-100 border-primary-500 text-primary-700'
+                  : 'bg-white border-gray-300 hover:border-gray-400'
+              }`}
+              title="引用记忆"
+            >
+              📝
+            </button>
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+              placeholder="输入消息... (Shift+Enter 换行，Enter 发送)"
+              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              rows={1}
+              style={{ minHeight: '44px', maxHeight: '200px' }}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!input.trim() || isLoading}
+              className="px-6 py-3 bg-primary-600 text-white rounded-xl hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+              发送
+            </button>
+          </div>
+          <div className="text-center text-xs text-gray-400 mt-2">
+            AI 生成的内容可能不准确，请谨慎参考
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,1285 @@
+import React, { useState, useEffect } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import Chat from './components/Chat'
+import Skills from './components/Skills'
+import Schedule from './components/Schedule'
+import Memory from './components/Memory'
+import Agents from './components/Agents'
+import Browser from './components/Browser'
+import AISettings from './components/AISettings'
+import './App.css'
+
+function App() {
+  const [currentPage, setCurrentPage] = useState('chat')
+  const [config, setConfig] = useState(null)
+  const [systemInfo, setSystemInfo] = useState(null)
+  const [showAISettings, setShowAISettings] = useState(false)
+
+  useEffect(() => {
+    loadConfig()
+    loadSystemInfo()
+  }, [])
+
+  const loadConfig = async () => {
+    try {
+      const cfg = await invoke('get_config')
+      setConfig(cfg)
+    } catch (error) {
+      console.error('加载配置失败:', error)
+    }
+  }
+
+  const loadSystemInfo = async () => {
+    try {
+      const info = await invoke('get_system_info')
+      setSystemInfo(info)
+    } catch (error) {
+      console.error('获取系统信息失败:', error)
+    }
+  }
+
+  const renderDashboard = () => (
+    <div className="space-y-6">
+      {/* 欢迎卡片 */}
+      <div className="card bg-gradient-to-r from-primary-500 to-primary-600 text-white">
+        <h1 className="text-3xl font-bold mb-2">
+          👋 欢迎使用 OpenClaw AI 助手
+        </h1>
+        <p className="text-primary-100">
+          国内版 AI 助手，支持通义千问、DeepSeek、文心一言、智谱 GLM 等多种模型
+        </p>
+      </div>
+
+      {/* 快捷入口 */}
+      <div className="grid grid-cols-4 gap-4">
+        <button
+          onClick={() => setCurrentPage('chat')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">💬</div>
+          <div className="font-semibold text-gray-900">AI 对话</div>
+          <div className="text-sm text-gray-600 mt-1">开始与 AI 助手对话</div>
+        </button>
+        <button
+          onClick={() => setCurrentPage('agents')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">🤖</div>
+          <div className="font-semibold text-gray-900">Agents</div>
+          <div className="text-sm text-gray-600 mt-1">管理和配置 AI 智能体</div>
+        </button>
+        <button
+          onClick={() => setCurrentPage('browser')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">🌐</div>
+          <div className="font-semibold text-gray-900">浏览器工具</div>
+          <div className="text-sm text-gray-600 mt-1">自动化浏览器操作</div>
+        </button>
+        <button
+          onClick={() => setCurrentPage('skills')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">🛠️</div>
+          <div className="font-semibold text-gray-900">Skills 管理</div>
+          <div className="text-sm text-gray-600 mt-1">管理和配置技能</div>
+        </button>
+        <button
+          onClick={() => setCurrentPage('schedule')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">⏰</div>
+          <div className="font-semibold text-gray-900">定时任务</div>
+          <div className="text-sm text-gray-600 mt-1">创建自动化任务</div>
+        </button>
+        <button
+          onClick={() => setCurrentPage('memory')}
+          className="card p-6 text-left hover:ring-2 hover:ring-primary-500 transition-all"
+        >
+          <div className="text-3xl mb-2">📝</div>
+          <div className="font-semibold text-gray-900">记忆管理</div>
+          <div className="text-sm text-gray-600 mt-1">管理知识记忆文件</div>
+        </button>
+      </div>
+
+      {/* 系统信息 */}
+      {systemInfo && (
+        <div className="card">
+          <h2 className="text-xl font-semibold mb-4">💻 系统信息</h2>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <div className="text-sm text-gray-600">操作系统</div>
+              <div className="font-medium">{systemInfo.os} {systemInfo.arch}</div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600">主机名</div>
+              <div className="font-medium">{systemInfo.hostname}</div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600">总内存</div>
+              <div className="font-medium">{(systemInfo.total_memory_mb / 1024).toFixed(1)} GB</div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600">可用内存</div>
+              <div className="font-medium">{(systemInfo.available_memory_mb / 1024).toFixed(1)} GB</div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600">CPU 使用率</div>
+              <div className="font-medium">{(systemInfo.cpu_usage * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+
+  const renderSettings = () => (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">⚙️ 设置</h1>
+          <p className="text-gray-600 mt-1">配置 AI 服务和应用设置</p>
+        </div>
+        <button onClick={loadConfig} className="button-secondary">
+          🔄 刷新
+        </button>
+      </div>
+
+      {/* AI 服务配置 - 新入口 */}
+      <div className="card">
+        <h2 className="text-xl font-semibold mb-4">🤖 AI 服务配置</h2>
+        <div className="p-6 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-semibold text-gray-900 mb-1">模型管理界面</div>
+              <div className="text-sm text-gray-600">
+                支持 10+ AI 提供商（国内/国外） • 模型选择 • API Key 管理
+              </div>
+            </div>
+            <button
+              onClick={() => setShowAISettings(true)}
+              className="px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg font-medium hover:from-blue-700 hover:to-purple-700 shadow-lg"
+            >
+              🚀 打开模型管理
+            </button>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🇨🇳 通义千问</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🇨🇳 智谱 GLM</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🇨🇳 DeepSeek</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🇨🇳 文心一言</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🌍 OpenAI</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🌍 Anthropic</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">🌍 Google</span>
+            <span className="px-2 py-1 bg-white rounded text-xs text-gray-600">+ 更多</span>
+          </div>
+        </div>
+      </div>
+
+        {/* 通义千问 */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🟠</span> 通义千问（阿里云）
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.qwen?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      qwen: { ...config?.ai_provider?.qwen, api_key: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">默认模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.qwen?.model || 'qwen-plus'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      qwen: { ...config?.ai_provider?.qwen, model: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="qwen-plus">qwen-plus</option>
+                <option value="qwen-turbo">qwen-turbo</option>
+                <option value="qwen-max">qwen-max</option>
+                <option value="qwen-long">qwen-long</option>
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const input = e.target
+                    const modelName = input.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.qwen?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            qwen: {
+                              ...config?.ai_provider?.qwen,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }
+                      input.value = ''
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('input[placeholder="输入自定义模型名称..."]')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.qwen?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          qwen: {
+                            ...config?.ai_provider?.qwen,
+                            custom_models: [...customModels, modelName]
+                          }
+                        }
+                      }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.qwen?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.qwen?.custom_models || []).map((model) => (
+                  <span
+                    key={model}
+                    className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm"
+                  >
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.qwen?.custom_models?.filter(m => m !== model) || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            qwen: {
+                              ...config?.ai_provider?.qwen,
+                              custom_models: customModels
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* DeepSeek */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🔵</span> DeepSeek
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.deepseek?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      deepseek: { ...config?.ai_provider?.deepseek, api_key: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">默认模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.deepseek?.model || 'deepseek-chat'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      deepseek: { ...config?.ai_provider?.deepseek, model: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="deepseek-chat">deepseek-chat</option>
+                <option value="deepseek-coder">deepseek-coder</option>
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1 deepseek-custom-input"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const input = e.target
+                    const modelName = input.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.deepseek?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            deepseek: {
+                              ...config?.ai_provider?.deepseek,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }
+                      input.value = ''
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('.deepseek-custom-input')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.deepseek?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          deepseek: {
+                            ...config?.ai_provider?.deepseek,
+                            custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.deepseek?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.deepseek?.custom_models || []).map((model) => (
+                  <span
+                    key={model}
+                    className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm"
+                  >
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.deepseek?.custom_models?.filter(m => m !== model) || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            deepseek: {
+                              ...config?.ai_provider?.deepseek,
+                              custom_models: customModels
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 文心一言 */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🔴</span> 文心一言（百度）
+          </h3>
+          <div className="grid grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.ernie?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      ernie: { ...config?.ai_provider?.ernie, api_key: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Secret Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.ernie?.secret_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      ernie: { ...config?.ai_provider?.ernie, secret_key: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">默认模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.ernie?.model || 'ernie-bot-4'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      ernie: { ...config?.ai_provider?.ernie, model: e.target.value }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="ernie-bot">ernie-bot</option>
+                <option value="ernie-bot-turbo">ernie-bot-turbo</option>
+                <option value="ernie-bot-4">ernie-bot-4</option>
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1 ernie-custom-input"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const input = e.target
+                    const modelName = input.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.ernie?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            ernie: {
+                              ...config?.ai_provider?.ernie,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }
+                      input.value = ''
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('.ernie-custom-input')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.ernie?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          ernie: {
+                            ...config?.ai_provider?.ernie,
+                            custom_models: [...customModels, modelName]
+                          }
+                        }
+                      }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.ernie?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.ernie?.custom_models || []).map((model) => (
+                  <span
+                    key={model}
+                    className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm"
+                  >
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.ernie?.custom_models?.filter(m => m !== model) || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            ernie: {
+                              ...config?.ai_provider?.ernie,
+                              custom_models: customModels
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 智谱 GLM */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🟣</span> 智谱 GLM
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.zhipu?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      zhipu: {
+                        enabled: true,
+                        api_key: e.target.value,
+                        model: config?.ai_provider?.zhipu?.model || 'glm-4',
+                        custom_models: config?.ai_provider?.zhipu?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.zhipu?.model || 'glm-4'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      zhipu: {
+                        enabled: true,
+                        api_key: config?.ai_provider?.zhipu?.api_key || '',
+                        model: e.target.value,
+                        custom_models: config?.ai_provider?.zhipu?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="glm-4">glm-4</option>
+                <option value="glm-4-flash">glm-4-flash</option>
+                <option value="glm-4-plus">glm-4-plus</option>
+                {(config?.ai_provider?.zhipu?.custom_models || []).map(model => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1 zhipu-custom-input"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const modelName = e.target.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.zhipu?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            zhipu: {
+                              ...config?.ai_provider?.zhipu,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                        e.target.value = ''
+                      }
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('.zhipu-custom-input')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.zhipu?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          zhipu: {
+                            ...config?.ai_provider?.zhipu,
+                            custom_models: [...customModels, modelName]
+                          }
+                        }
+                      }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.zhipu?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.zhipu?.custom_models || []).map((model) => (
+                  <span key={model} className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm">
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.zhipu?.custom_models || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            zhipu: {
+                              ...config?.ai_provider?.zhipu,
+                              custom_models: customModels.filter(m => m !== model)
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 月之暗面 */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🌙</span> 月之暗面（Kimi）
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.moonshot?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      moonshot: {
+                        enabled: true,
+                        api_key: e.target.value,
+                        model: config?.ai_provider?.moonshot?.model || 'moonshot-v1-128k',
+                        custom_models: config?.ai_provider?.moonshot?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.moonshot?.model || 'moonshot-v1-128k'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      moonshot: {
+                        enabled: true,
+                        api_key: config?.ai_provider?.moonshot?.api_key || '',
+                        model: e.target.value,
+                        custom_models: config?.ai_provider?.moonshot?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="moonshot-v1-128k">moonshot-v1-128k</option>
+                <option value="moonshot-v1-32k">moonshot-v1-32k</option>
+                {(config?.ai_provider?.moonshot?.custom_models || []).map(model => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1 moonshot-custom-input"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const modelName = e.target.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.moonshot?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            moonshot: {
+                              ...config?.ai_provider?.moonshot,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                        e.target.value = ''
+                      }
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('.moonshot-custom-input')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.moonshot?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          moonshot: {
+                            ...config?.ai_provider?.moonshot,
+                            custom_models: [...customModels, modelName]
+                          }
+                        }
+                      }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.moonshot?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.moonshot?.custom_models || []).map((model) => (
+                  <span key={model} className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm">
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.moonshot?.custom_models || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            moonshot: {
+                              ...config?.ai_provider?.moonshot,
+                              custom_models: customModels.filter(m => m !== model)
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 豆包 */}
+        <div className="space-y-4 mb-6 pb-6 border-b border-gray-200">
+          <h3 className="font-medium flex items-center gap-2">
+            <span className="text-xl">🟤</span> 豆包（火山引擎）
+          </h3>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+              <input
+                type="password"
+                className="input"
+                value={config?.ai_provider?.doubao?.api_key || ''}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      doubao: {
+                        enabled: true,
+                        api_key: e.target.value,
+                        model: config?.ai_provider?.doubao?.model || 'doubao-pro-256k',
+                        custom_models: config?.ai_provider?.doubao?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+                placeholder="xxxxxxxxxxxxxxxxxxxxxxxx"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">模型</label>
+              <select
+                className="input"
+                value={config?.ai_provider?.doubao?.model || 'doubao-pro-256k'}
+                onChange={(e) => {
+                  const newConfig = {
+                    ...config,
+                    ai_provider: {
+                      ...config?.ai_provider,
+                      doubao: {
+                        enabled: true,
+                        api_key: config?.ai_provider?.doubao?.api_key || '',
+                        model: e.target.value,
+                        custom_models: config?.ai_provider?.doubao?.custom_models || []
+                      }
+                    }
+                  }
+                  setConfig(newConfig)
+                  invoke('set_config', { config: newConfig })
+                }}
+              >
+                <option value="doubao-pro-256k">doubao-pro-256k</option>
+                <option value="doubao-pro-32k">doubao-pro-32k</option>
+                {(config?.ai_provider?.doubao?.custom_models || []).map(model => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {/* 自定义模型管理 */}
+          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">自定义模型</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="text"
+                className="input flex-1 doubao-custom-input"
+                placeholder="输入自定义模型名称..."
+                onKeyPress={(e) => {
+                  if (e.key === 'Enter') {
+                    const modelName = e.target.value.trim()
+                    if (modelName) {
+                      const customModels = config?.ai_provider?.doubao?.custom_models || []
+                      if (!customModels.includes(modelName)) {
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            doubao: {
+                              ...config?.ai_provider?.doubao,
+                              custom_models: [...customModels, modelName]
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                        e.target.value = ''
+                      }
+                    }
+                  }
+                }}
+              />
+              <button
+                onClick={() => {
+                  const input = document.querySelector('.doubao-custom-input')
+                  const modelName = input?.value?.trim()
+                  if (modelName) {
+                    const customModels = config?.ai_provider?.doubao?.custom_models || []
+                    if (!customModels.includes(modelName)) {
+                      const newConfig = {
+                        ...config,
+                        ai_provider: {
+                          ...config?.ai_provider,
+                          doubao: {
+                            ...config?.ai_provider?.doubao,
+                            custom_models: [...customModels, modelName]
+                          }
+                        }
+                      }
+                      setConfig(newConfig)
+                      invoke('set_config', { config: newConfig })
+                      if (input) input.value = ''
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                添加
+              </button>
+            </div>
+            {(config?.ai_provider?.doubao?.custom_models || []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(config?.ai_provider?.doubao?.custom_models || []).map((model) => (
+                  <span key={model} className="inline-flex items-center gap-1 px-2 py-1 bg-white border rounded-lg text-sm">
+                    {model}
+                    <button
+                      onClick={() => {
+                        const customModels = config?.ai_provider?.doubao?.custom_models || []
+                        const newConfig = {
+                          ...config,
+                          ai_provider: {
+                            ...config?.ai_provider,
+                            doubao: {
+                              ...config?.ai_provider?.doubao,
+                              custom_models: customModels.filter(m => m !== model)
+                            }
+                          }
+                        }
+                        setConfig(newConfig)
+                        invoke('set_config', { config: newConfig })
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-500"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 其他设置 */}
+      <div className="card">
+        <h2 className="text-xl font-semibold mb-4">🔧 其他设置</h2>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-medium">开机自启动</div>
+              <div className="text-sm text-gray-600">系统启动时自动运行应用</div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" className="sr-only peer" />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+            </label>
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="font-medium">系统托盘</div>
+              <div className="text-sm text-gray-600">最小化到系统托盘</div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" className="sr-only peer" defaultChecked />
+              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+            </label>
+          </div>
+          <button
+            onClick={() => invoke('open_logs_folder')}
+            className="w-full text-left p-3 bg-gray-50 rounded-lg hover:bg-gray-100"
+          >
+            📁 打开日志文件夹
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="h-screen flex bg-gray-100">
+      {/* 侧边栏 */}
+      <div className="w-64 bg-gray-900 text-white flex flex-col">
+        <div className="p-6 border-b border-gray-800">
+          <h1 className="text-xl font-bold flex items-center gap-2">
+            🤖 OpenClaw
+          </h1>
+          <p className="text-sm text-gray-400 mt-1">国内版 AI 助手</p>
+        </div>
+
+        <nav className="flex-1 p-4 space-y-1">
+          <button
+            onClick={() => setCurrentPage('dashboard')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'dashboard'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>📊</span>
+            <span>仪表盘</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('chat')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'chat'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>💬</span>
+            <span>AI 对话</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('agents')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'agents'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>🤖</span>
+            <span>Agents</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('browser')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'browser'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>🌐</span>
+            <span>浏览器工具</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('wechat')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'wechat'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>📱</span>
+            <span>微信管理</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('skills')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'skills'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>🛠️</span>
+            <span>Skills</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('schedule')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'schedule'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>⏰</span>
+            <span>定时任务</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('memory')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'memory'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>📝</span>
+            <span>记忆管理</span>
+          </button>
+          <button
+            onClick={() => setCurrentPage('settings')}
+            className={`w-full text-left px-4 py-3 rounded-lg transition-colors flex items-center gap-3 ${
+              currentPage === 'settings'
+                ? 'bg-primary-600 text-white'
+                : 'hover:bg-gray-800 text-gray-300'
+            }`}
+          >
+            <span>⚙️</span>
+            <span>设置</span>
+          </button>
+        </nav>
+
+        <div className="p-4 border-t border-gray-800">
+          <div className="text-xs text-gray-500">
+            版本 1.0.0
+          </div>
+        </div>
+      </div>
+
+      {/* 主内容区 */}
+      <div className="flex-1 overflow-auto">
+        {currentPage === 'dashboard' && renderDashboard()}
+        {currentPage === 'chat' && <Chat />}
+        {currentPage === 'settings' && renderSettings()}
+        {currentPage === 'skills' && <Skills />}
+        {currentPage === 'schedule' && <Schedule />}
+        {currentPage === 'memory' && <Memory />}
+        {currentPage === 'agents' && <Agents />}
+        {currentPage === 'browser' && <Browser />}
+        {currentPage === 'wechat' && (
+          <div className="p-8">
+            <div className="card">
+              <h2 className="text-xl font-semibold mb-4">📱 微信管理</h2>
+              <p className="text-gray-600">微信自动回复功能开发中...</p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default App

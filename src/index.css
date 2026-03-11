@@ -1,0 +1,715 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Big Sur 浅色主题 - 主色调 */
+    --background: 0 0% 97%;          /* #F5F5F7 */
+    --surface: 220 20% 98%;          /* #F8F9FB */
+    --surface-elevated: 220 15% 96%; /* #EFF1F5 */
+
+    /* 文本颜色 */
+    --foreground: 220 30% 15%;       /* #212529 */
+    --foreground-secondary: 220 15% 45%; /* #6B7280 */
+    --foreground-tertiary: 220 10% 60%;  /* #9CA3AF */
+
+    /* 卡片与弹出层 */
+    --card: 0 0% 100%;
+    --card-foreground: 220 30% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 30% 15%;
+
+    /* 品牌色 - 保持蓝色系 */
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --primary-light: 221.2 83.2% 60%;
+    --primary-dark: 221.2 83.2% 45%;
+
+    /* 次要色 */
+    --secondary: 220 20% 98%;
+    --secondary-foreground: 220 30% 15%;
+
+    /* 静音色 */
+    --muted: 220 15% 96%;
+    --muted-foreground: 220 10% 60%;
+
+    /* 强调色 */
+    --accent: 220 15% 96%;
+    --accent-foreground: 220 30% 15%;
+
+    /* 语义色 */
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+    --success: 142 76% 36%;
+    --warning: 38 92% 50%;
+    --info: 199 89% 48%;
+
+    /* 边框 */
+    --border: 220 20% 90%;           /* #E5E7EB */
+    --border-subtle: 220 20% 95%;    /* #F3F4F6 */
+    --input: 220 20% 90%;
+
+    /* 焦点环 */
+    --ring: 221.2 83.2% 53.3%;
+
+    /* 圆角系统 */
+    --radius: 0.75rem;      /* 12px - 默认 */
+    --radius-sm: 0.5rem;    /* 8px */
+    --radius-md: 0.75rem;   /* 12px */
+    --radius-lg: 1rem;      /* 16px */
+    --radius-xl: 1.25rem;   /* 20px */
+    --radius-2xl: 1.5rem;   /* 24px */
+
+    /* 毛玻璃效果 */
+    --glass-bg: 0 0% 100% / 0.7;
+    --glass-border: 0 0% 100% / 0.18;
+  }
+
+  .dark {
+    /* 暗色主题 */
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --surface: 220 20% 12%;
+    --surface-elevated: 220 15% 16%;
+    --foreground-secondary: 215 20% 65%;
+    --foreground-tertiary: 215 15% 50%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --border-subtle: 220 15% 22%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+    --glass-bg: 0 0% 10% / 0.7;
+    --glass-border: 0 0% 100% / 0.1;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* 全局样式 */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 苹果风格平滑过渡 */
+* {
+  transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* 禁用过渡的元素 */
+*:not([data-transition]) {
+  transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
+}
+
+/* 自定义滚动条样式 - 苹果风格 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* ============================================
+   Big Sur 阴影系统
+   ============================================ */
+@layer utilities {
+  /* 基础阴影 - 微妙 */
+  .shadow-sm {
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.04),
+      0 1px 4px rgba(0, 0, 0, 0.02);
+  }
+
+  /* 中等阴影 - 标准 */
+  .shadow-md {
+    box-shadow:
+      0 2px 4px rgba(0, 0, 0, 0.04),
+      0 4px 8px rgba(0, 0, 0, 0.02),
+      0 8px 16px rgba(0, 0, 0, 0.01);
+  }
+
+  /* 大阴影 - 悬浮效果 */
+  .shadow-lg {
+    box-shadow:
+      0 4px 8px rgba(0, 0, 0, 0.04),
+      0 8px 16px rgba(0, 0, 0, 0.02),
+      0 16px 32px rgba(0, 0, 0, 0.01);
+  }
+
+  /* 内阴影 */
+  .shadow-inner {
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+
+  /* 毛玻璃阴影 - 用于毛玻璃背景元素 */
+  .shadow-glass {
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.04),
+      0 2px 8px rgba(0, 0, 0, 0.02);
+  }
+
+  /* 无阴影 */
+  .shadow-none {
+    box-shadow: none;
+  }
+}
+
+/* ============================================
+   毛玻璃效果工具类
+   ============================================ */
+@layer utilities {
+  /* 基础毛玻璃 */
+  .glass {
+    background: hsl(var(--glass-bg));
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+
+  /* 轻量毛玻璃 */
+  .glass-light {
+    background: rgba(255, 255, 255, 0.5);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  /* 毛玻璃边框 */
+  .glass-border {
+    border: 1px solid hsl(var(--glass-border));
+  }
+
+  /* 完整毛玻璃组件 */
+  .glass-panel {
+    background: hsl(var(--glass-bg));
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid hsl(var(--glass-border));
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.04),
+      0 2px 8px rgba(0, 0, 0, 0.02);
+  }
+}
+
+/* ============================================
+   表面颜色工具类
+   ============================================ */
+@layer utilities {
+  .bg-surface {
+    background-color: hsl(var(--surface));
+  }
+
+  .bg-surface-elevated {
+    background-color: hsl(var(--surface-elevated));
+  }
+
+  .text-foreground-secondary {
+    color: hsl(var(--foreground-secondary));
+  }
+
+  .text-foreground-tertiary {
+    color: hsl(var(--foreground-tertiary));
+  }
+
+  .border-subtle {
+    border-color: hsl(var(--border-subtle));
+  }
+}
+
+/* ============================================
+   动画时长工具类
+   ============================================ */
+@layer utilities {
+  .duration-fast {
+    transition-duration: 100ms;
+  }
+
+  .duration-normal {
+    transition-duration: 150ms;
+  }
+
+  .duration-slow {
+    transition-duration: 200ms;
+  }
+
+  .duration-slower {
+    transition-duration: 300ms;
+  }
+}
+
+/* ============================================
+   缓动函数工具类
+   ============================================ */
+@layer utilities {
+  .ease-apple {
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+/* ============================================
+   Big Sur 风格组件类
+   ============================================ */
+@layer components {
+  /* 卡片容器 */
+  .card-suru {
+    @apply rounded-xl border border-border-subtle bg-white shadow-sm;
+  }
+
+  /* 按钮基础 */
+  .btn-sur {
+    @apply inline-flex items-center justify-center gap-2 font-medium rounded-lg;
+    @apply transition-all duration-150 ease-apple;
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring;
+    @apply disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  /* 导航项 */
+  .nav-item {
+    @apply w-full flex items-center gap-3 px-3 py-2.5 rounded-xl;
+    @apply transition-all duration-150 ease-apple;
+    @apply text-foreground-secondary hover:bg-surface-elevated hover:text-foreground;
+  }
+
+  .nav-item-active {
+    @apply bg-primary/10 text-primary;
+    position: relative;
+  }
+
+  .nav-item-active::before {
+    content: '';
+    @apply absolute left-0 w-1 h-8 bg-primary rounded-r-full;
+  }
+}
+
+/* ============================================
+   动画定义
+   ============================================ */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes slideInFromTop {
+  from {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInFromBottom {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInFromLeft {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideInFromRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideOutToTop {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+}
+
+@keyframes slideOutToBottom {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes slideOutToLeft {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+
+@keyframes slideOutToRight {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes scaleOut {
+  from {
+    transform: scale(1);
+    opacity: 1;
+  }
+  to {
+    transform: scale(0.95);
+    opacity: 0;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(-5%);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+  50% {
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+/* ============================================
+   动画工具类
+   ============================================ */
+@layer utilities {
+  /* 淡入淡出 */
+  .animate-fade-in {
+    animation: fadeIn 150ms ease-out;
+  }
+
+  .animate-fade-out {
+    animation: fadeOut 150ms ease-in;
+  }
+
+  /* 滑动进入 */
+  .animate-slide-in-top {
+    animation: slideInFromTop 200ms ease-out;
+  }
+
+  .animate-slide-in-bottom {
+    animation: slideInFromBottom 200ms ease-out;
+  }
+
+  .animate-slide-in-left {
+    animation: slideInFromLeft 200ms ease-out;
+  }
+
+  .animate-slide-in-right {
+    animation: slideInFromRight 200ms ease-out;
+  }
+
+  /* 滑动退出 */
+  .animate-slide-out-top {
+    animation: slideOutToTop 150ms ease-in;
+  }
+
+  .animate-slide-out-bottom {
+    animation: slideOutToBottom 150ms ease-in;
+  }
+
+  .animate-slide-out-left {
+    animation: slideOutToLeft 150ms ease-in;
+  }
+
+  .animate-slide-out-right {
+    animation: slideOutToRight 150ms ease-in;
+  }
+
+  /* 缩放 */
+  .animate-scale-in {
+    animation: scaleIn 150ms ease-out;
+  }
+
+  .animate-scale-out {
+    animation: scaleOut 150ms ease-in;
+  }
+
+  /* 旋转 */
+  .animate-spin-slow {
+    animation: spin 3s linear infinite;
+  }
+
+  /* 弹跳 */
+  .animate-ping {
+    animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+  }
+
+  /* 脉冲 */
+  .animate-pulse {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  /* 弹跳 */
+  .animate-bounce {
+    animation: bounce 1s infinite;
+  }
+
+  /* 悬停动画 */
+  .hover-lift {
+    @apply transition-transform duration-normal ease-apple;
+  }
+
+  .hover-lift:hover {
+    @apply -translate-y-0.5;
+  }
+
+  .hover-scale {
+    @apply transition-transform duration-normal ease-apple;
+  }
+
+  .hover-scale:hover {
+    @apply scale-105;
+  }
+
+  /* 加载动画 */
+  .loading-skeleton {
+    @apply animate-pulse bg-surface-elevated;
+  }
+
+  .loading-dots span {
+    @apply inline-block w-2 h-2 bg-current rounded-full;
+    animation: bounce 1.4s infinite ease-in-out both;
+  }
+
+  .loading-dots span:nth-child(1) {
+    animation-delay: -0.32s;
+  }
+
+  .loading-dots span:nth-child(2) {
+    animation-delay: -0.16s;
+  }
+}
+
+/* ============================================
+   Markdown Prose 样式
+   ============================================ */
+.prose {
+  color: hsl(var(--foreground));
+  line-height: 1.7;
+}
+
+.prose p {
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  color: hsl(var(--foreground));
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose h1 { font-size: 1.5em; }
+.prose h2 { font-size: 1.3em; }
+.prose h3 { font-size: 1.15em; }
+.prose h4 { font-size: 1.05em; }
+
+.prose ul, .prose ol {
+  padding-left: 1.5em;
+  margin: 0.75em 0;
+}
+
+.prose li {
+  margin: 0.25em 0;
+}
+
+.prose li::marker {
+  color: hsl(var(--primary));
+}
+
+.prose blockquote {
+  border-left: 3px solid hsl(var(--primary));
+  padding-left: 1em;
+  margin: 1em 0;
+  color: hsl(var(--foreground-secondary));
+  font-style: italic;
+}
+
+.prose a {
+  color: hsl(var(--primary));
+  text-decoration: none;
+}
+
+.prose a:hover {
+  text-decoration: underline;
+}
+
+.prose hr {
+  border-color: hsl(var(--border));
+  margin: 1.5em 0;
+}
+
+.prose img {
+  border-radius: 8px;
+  margin: 1em 0;
+}
+
+/* ============================================
+   代码高亮样式 (highlight.js 主题)
+   ============================================ */
+.hljs {
+  background: #f8f9fa;
+  color: #24292e;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #6a737d;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-section,
+.hljs-link {
+  color: #d73a49;
+}
+
+.hljs-string,
+.hljs-title,
+.hljs-name,
+.hljs-type,
+.hljs-attribute,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition,
+.hljs-variable,
+.hljs-template-tag,
+.hljs-template-variable {
+  color: #032f62;
+}
+
+.hljs-function,
+.hljs-built_in,
+.hljs-number {
+  color: #005cc5;
+}
+
+.hljs-deletion {
+  color: #b31d28;
+  background-color: #ffeef0;
+}
+
+.hljs-addition {
+  background-color: #e6ffed;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}

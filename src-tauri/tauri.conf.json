@@ -1,0 +1,56 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "OpenClaw CN",
+  "version": "1.0.0",
+  "identifier": "com.openclaw.cn",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "OpenClaw CN AI 助手",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Visible",
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [],
+    "copyright": "Copyright © 2025 OpenClaw CN",
+    "category": "Productivity",
+    "shortDescription": "AI 助手桌面应用",
+    "longDescription": "OpenClaw CN 是一个强大的 AI 助手，支持国内主流 AI 服务，自动安装，开箱即用",
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "10.13",
+      "frameworks": []
+    },
+    "publisher": "OpenClaw CN"
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

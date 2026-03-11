@@ -1,0 +1,47 @@
+# ========== Cargo 编译优化配置 ==========
+
+# 使用所有 CPU 核心
+[build]
+jobs = 8
+
+# 增量编译缓存目录
+incremental = true
+
+# ========== 链接器优化 (macOS) ==========
+[target.aarch64-apple-darwin]
+# 使用更快的链接器 (如果安装了 lld)
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+# 优化编译时间
+rustflags = [
+  "-C", "target-cpu=native",  # 使用本地 CPU 特性
+]
+
+# ========== 通用优化 ==========
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C", "target-cpu=native",
+]
+
+# ========== 网络优化 ==========
+[net]
+# 并行下载依赖
+retry = 3
+offline = false
+
+[http]
+# HTTP 超时
+timeout = 60
+low-speed-limit = 10
+
+# ========== 注册表优化 ==========
+[registry]
+# 使用稀疏注册表（更快）
+protocol = "sparse"
+
+# ========== term 优化 ==========
+[term]
+# 进度条
+verbose = false
+color = "auto"
