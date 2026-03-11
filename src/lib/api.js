@@ -612,6 +612,46 @@ const api = {
       }
     },
   },
+
+  // ========== 更新管理（Tauri 命令）==========
+  updates: {
+    // 获取当前版本
+    getVersion: async () => {
+      try {
+        const result = await invoke('get_app_version')
+        return { success: true, data: result }
+      } catch (error) {
+        return handleError(error, { method: 'get_app_version' })
+      }
+    },
+    // 检查更新
+    check: async () => {
+      try {
+        const result = await invoke('check_for_updates')
+        return { success: true, data: result }
+      } catch (error) {
+        return handleError(error, { method: 'check_for_updates' })
+      }
+    },
+    // 下载更新
+    download: async () => {
+      try {
+        const result = await invoke('download_update')
+        return { success: true, data: result }
+      } catch (error) {
+        return handleError(error, { method: 'download_update' })
+      }
+    },
+    // 安装更新
+    install: async () => {
+      try {
+        const result = await invoke('install_update')
+        return { success: true, data: result }
+      } catch (error) {
+        return handleError(error, { method: 'install_update' })
+      }
+    },
+  },
 }
 
 export default api
