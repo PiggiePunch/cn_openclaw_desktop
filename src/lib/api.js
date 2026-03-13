@@ -41,7 +41,42 @@ function convertAccountsArrayToObject(config) {
           if (account && account.id) {
             // 提取账户数据，排除 id 字段（id 变成 key）
             const { id, ...accountData } = account
-            accountsObj[id] = accountData
+
+            if (channelType === 'telegram') {
+              const botToken = accountData.botToken ?? accountData.bot_token ?? ''
+              const allowFrom = Array.isArray(accountData.allowFrom)
+                ? accountData.allowFrom
+                : (Array.isArray(accountData.allowed_users) ? accountData.allowed_users : [])
+              const groups = (() => {
+                if (accountData.groups && typeof accountData.groups === 'object' && !Array.isArray(accountData.groups)) {
+                  return accountData.groups
+                }
+                if (Array.isArray(accountData.allowed_groups)) {
+                  const mapped = {}
+                  for (const groupId of accountData.allowed_groups) {
+                    if (typeof groupId === 'string' && groupId.trim()) {
+                      mapped[groupId.trim()] = { enabled: true, requireMention: false }
+                    }
+                  }
+                  return mapped
+                }
+                return {}
+              })()
+
+              accountsObj[id] = {
+                ...accountData,
+                botToken,
+                allowFrom,
+                groups,
+              }
+
+              delete accountsObj[id].bot_token
+              delete accountsObj[id].allowed_users
+              delete accountsObj[id].allowed_groups
+              delete accountsObj[id].proxy_url
+            } else {
+              accountsObj[id] = accountData
+            }
           }
         }
         channel.accounts = accountsObj
@@ -73,10 +108,32 @@ function convertAccountsObjectToArray(config) {
       const channel = result.channels[channelType]
       if (channel && channel.accounts && typeof channel.accounts === 'object' && !Array.isArray(channel.accounts)) {
         // 将对象转换为数组
-        const accountsArray = Object.entries(channel.accounts).map(([id, accountData]) => ({
-          id,
-          ...accountData
-        }))
+        const accountsArray = Object.entries(channel.accounts).map(([id, accountData]) => {
+          const raw = accountData && typeof accountData === 'object' ? accountData : {}
+
+          if (channelType === 'telegram') {
+            const allowedGroups = Array.isArray(raw.allowed_groups)
+              ? raw.allowed_groups
+              : Object.keys(raw.groups || {})
+            const allowedUsers = Array.isArray(raw.allowed_users)
+              ? raw.allowed_users
+              : (Array.isArray(raw.allowFrom) ? raw.allowFrom : [])
+
+            return {
+              id,
+              ...raw,
+              bot_token: raw.bot_token ?? raw.botToken ?? '',
+              allowed_groups: allowedGroups,
+              allowed_users: allowedUsers,
+              proxy_url: raw.proxy_url ?? raw.proxyUrl ?? '',
+            }
+          }
+
+          return {
+            id,
+            ...raw,
+          }
+        })
         channel.accounts = accountsArray
         console.log(`[API] 转换 ${channelType}.accounts: 对象 -> 数组`)
       }
@@ -257,11 +314,23 @@ function buildUiAiProviderFromModels(config) {
     }
   }
 
+  const isGeneratedProviderUsable = (providerId) => {
+    const item = generated[providerId]
+    if (!isPlainObject(item)) return false
+    if (item.enabled === false) return false
+    const hasApiKey = typeof item.api_key === 'string' && item.api_key.trim().length > 0
+    const hasModel = Array.isArray(item.custom_models) && item.custom_models.length > 0
+    return hasApiKey && hasModel
+  }
+
   let current = typeof existingAiProvider.current === 'string' && existingAiProvider.current.trim()
     ? existingAiProvider.current.trim()
     : ''
-  if ((!current || !generated[current]) && primaryRef?.providerId && generated[primaryRef.providerId]) {
+  if ((!current || !generated[current] || !isGeneratedProviderUsable(current)) && primaryRef?.providerId && isGeneratedProviderUsable(primaryRef.providerId)) {
     current = primaryRef.providerId
+  }
+  if (!current || !generated[current] || !isGeneratedProviderUsable(current)) {
+    current = Object.keys(generated).find((providerId) => isGeneratedProviderUsable(providerId)) || ''
   }
   if (!current || !generated[current]) {
     current = Object.keys(generated)[0] || 'qwen'
@@ -315,9 +384,9 @@ function mergeAiProviderIntoModels(config) {
     }
     nextProvider.baseUrl = normalizeProviderBaseUrl(providerId, nextProvider.baseUrl)
 
-    if (isRedactedSecretString(nextProvider.apiKey)) {
-      delete nextProvider.apiKey
-    }
+    // 保留脱敏占位符，交给后端 save_openclaw_config 里的
+    // preserve_model_provider_api_keys 使用旧配置恢复真实 key。
+    // 这里删除会导致“未编辑 provider 的 key 被清空”。
 
     if (providerId === 'minimax') {
       nextProvider.api = 'anthropic-messages'
@@ -364,6 +433,8 @@ function mergeAiProviderIntoModels(config) {
     const findModelByProvider = (targetProviderId) => {
       const provider = providers[targetProviderId]
       if (!isPlainObject(provider)) return null
+      const hasApiKey = typeof provider.apiKey === 'string' && provider.apiKey.trim().length > 0
+      if (!hasApiKey) return null
       const modelIds = extractProviderModelIds(provider)
       if (modelIds.length === 0) return null
       return { providerId: targetProviderId, modelId: modelIds[0] }
@@ -604,10 +675,515 @@ function normalizeChatSendParams(rawParams = {}) {
   return { payload, sessionKey, model }
 }
 
+const CRON_ANNOUNCE_CHANNELS = new Set([
+  'last',
+  'telegram',
+  'discord',
+  'slack',
+  'mattermost',
+  'signal',
+  'imessage',
+  'whatsapp',
+])
+
+function sanitizeCronDeliveryInput(rawDelivery, options = {}) {
+  const forceDefaultNone = options.forceDefaultNone === true
+  if (!isPlainObject(rawDelivery)) {
+    return forceDefaultNone ? { mode: 'none' } : undefined
+  }
+
+  const modeRaw = typeof rawDelivery.mode === 'string' ? rawDelivery.mode.trim().toLowerCase() : ''
+  const mode = modeRaw === 'deliver' ? 'announce' : modeRaw
+
+  if (!mode) return forceDefaultNone ? { mode: 'none' } : undefined
+  if (mode === 'none') return { mode: 'none' }
+
+  if (mode === 'webhook') {
+    const webhookUrl = typeof rawDelivery.to === 'string' ? rawDelivery.to.trim() : ''
+    if (!/^https?:\/\//i.test(webhookUrl)) {
+      return { mode: 'none' }
+    }
+    return { mode: 'webhook', to: webhookUrl }
+  }
+
+  if (mode === 'announce') {
+    const channel = typeof rawDelivery.channel === 'string' ? rawDelivery.channel.trim().toLowerCase() : ''
+    const to = typeof rawDelivery.to === 'string' ? rawDelivery.to.trim() : ''
+    const accountId = typeof rawDelivery.accountId === 'string' ? rawDelivery.accountId.trim() : ''
+    const bestEffort = typeof rawDelivery.bestEffort === 'boolean' ? rawDelivery.bestEffort : undefined
+
+    // webchat 不是 cron announce 的稳定外发通道；必须回退到 none，避免随机串路由。
+    if (channel === 'webchat') return { mode: 'none' }
+
+    // announce 强制需要明确目标，避免回退到 last-route 造成“时好时坏”。
+    if (!to) return { mode: 'none' }
+
+    if (channel && !CRON_ANNOUNCE_CHANNELS.has(channel)) {
+      return { mode: 'none' }
+    }
+
+    const normalized = { mode: 'announce', to }
+    if (channel) normalized.channel = channel
+    if (accountId) normalized.accountId = accountId
+    if (bestEffort !== undefined) normalized.bestEffort = bestEffort
+    return normalized
+  }
+
+  return { mode: 'none' }
+}
+
+function sanitizeCronCreateInput(rawTask) {
+  const task = isPlainObject(rawTask) ? { ...rawTask } : {}
+  const sessionTarget = typeof task.sessionTarget === 'string' ? task.sessionTarget.trim().toLowerCase() : ''
+  const payloadKind = typeof task?.payload?.kind === 'string' ? task.payload.kind.trim() : ''
+  const shouldForceDelivery = sessionTarget === 'isolated' && payloadKind === 'agentTurn'
+  const normalizedDelivery = sanitizeCronDeliveryInput(task.delivery, { forceDefaultNone: shouldForceDelivery })
+  if (normalizedDelivery) {
+    task.delivery = normalizedDelivery
+  } else {
+    delete task.delivery
+  }
+  return task
+}
+
+function sanitizeCronUpdatePatch(rawPatch) {
+  const patch = isPlainObject(rawPatch) ? { ...rawPatch } : {}
+  if ('delivery' in patch) {
+    const normalizedDelivery = sanitizeCronDeliveryInput(patch.delivery, { forceDefaultNone: false })
+    if (normalizedDelivery) {
+      patch.delivery = normalizedDelivery
+    } else {
+      delete patch.delivery
+    }
+  }
+  return patch
+}
+
+const KNOWN_AGENT_CACHE_TTL_MS = 10_000
+const SAFE_AGENT_ID_RE = /^[A-Za-z0-9_-]+$/
+let knownAgentIdsCache = null
+let knownAgentIdsCacheAt = 0
+let knownAgentIdsInFlight = null
+const cleanedUnknownSessionKeys = new Set()
+const cleanedUnknownAgentIds = new Set()
+
+function normalizeSessionKeyValue(rawSessionKey) {
+  const raw = typeof rawSessionKey === 'string' ? rawSessionKey.trim() : ''
+  if (!raw) return 'main'
+  const lowered = raw.toLowerCase()
+  if (lowered === 'main' || lowered === 'agent:main' || lowered === 'agent:main:main') {
+    return 'main'
+  }
+  if (!raw.startsWith('agent:')) return raw
+
+  const parts = raw.split(':')
+  if (parts.length === 2) {
+    return `${raw}:main`
+  }
+  return raw
+}
+
+function extractAgentIdFromSessionKey(rawSessionKey) {
+  const normalized = normalizeSessionKeyValue(rawSessionKey)
+  if (normalized === 'main') return 'main'
+  if (!normalized.startsWith('agent:')) return 'main'
+  const parts = normalized.split(':')
+  return String(parts[1] || 'main').trim() || 'main'
+}
+
+function collectKnownAgentIdsFromRows(rows) {
+  const set = new Set(['main', 'default'])
+  if (!Array.isArray(rows)) return set
+  for (const row of rows) {
+    const id = String(row?.id || row?.agent_id || row?.agentId || '').trim()
+    if (!id) continue
+    set.add(id)
+  }
+  return set
+}
+
+async function getKnownAgentIdSet(options = {}) {
+  const forceRefresh = options.forceRefresh === true
+  const allowStale = options.allowStale !== false
+  const now = Date.now()
+
+  if (
+    !forceRefresh &&
+    Array.isArray(knownAgentIdsCache) &&
+    (now - knownAgentIdsCacheAt) < KNOWN_AGENT_CACHE_TTL_MS
+  ) {
+    return new Set(knownAgentIdsCache)
+  }
+
+  if (!forceRefresh && knownAgentIdsInFlight) {
+    try {
+      const inFlight = await knownAgentIdsInFlight
+      return new Set(inFlight)
+    } catch {
+      if (allowStale && Array.isArray(knownAgentIdsCache)) {
+        return new Set(knownAgentIdsCache)
+      }
+      return null
+    }
+  }
+
+  knownAgentIdsInFlight = (async () => {
+    const result = await api.agents.list()
+    if (!result.success || !Array.isArray(result.data)) {
+      throw new Error(result.error || '加载智能体列表失败')
+    }
+    const set = collectKnownAgentIdsFromRows(result.data)
+    const next = Array.from(set)
+    knownAgentIdsCache = next
+    knownAgentIdsCacheAt = Date.now()
+    return next
+  })()
+
+  try {
+    const latest = await knownAgentIdsInFlight
+    return new Set(latest)
+  } catch {
+    if (allowStale && Array.isArray(knownAgentIdsCache)) {
+      return new Set(knownAgentIdsCache)
+    }
+    return null
+  } finally {
+    knownAgentIdsInFlight = null
+  }
+}
+
+async function cleanupInvalidSessionAndAgentArtifacts(sessionKeys = [], agentIds = []) {
+  const uniqueSessionKeys = Array.from(new Set(
+    (Array.isArray(sessionKeys) ? sessionKeys : [])
+      .map((key) => normalizeSessionKeyValue(key))
+      .filter(Boolean),
+  ))
+  const uniqueAgentIds = Array.from(new Set(
+    (Array.isArray(agentIds) ? agentIds : [])
+      .map((id) => String(id || '').trim())
+      .filter((id) => id && id !== 'main' && SAFE_AGENT_ID_RE.test(id)),
+  ))
+
+  let removedSessionRefs = 0
+  let removedAgentDirs = 0
+
+  for (const key of uniqueSessionKeys) {
+    if (cleanedUnknownSessionKeys.has(key)) continue
+    cleanedUnknownSessionKeys.add(key)
+    try {
+      const result = await wrapGatewayCall('sessions.delete', { key }, { silent: true })
+      if (result.success) removedSessionRefs += 1
+    } catch {
+      // ignore
+    }
+  }
+
+  if (isTauriRuntime()) {
+    for (const agentId of uniqueAgentIds) {
+      if (cleanedUnknownAgentIds.has(agentId)) continue
+      cleanedUnknownAgentIds.add(agentId)
+      try {
+        await invokeTauri('delete_local_agent_data', { agentId })
+        removedAgentDirs += 1
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return {
+    removedSessionRefs,
+    removedAgentDirs,
+  }
+}
+
+async function filterSessionsByKnownAgents(rows, options = {}) {
+  const cleanup = options.cleanup !== false
+  const list = Array.isArray(rows) ? rows : []
+  const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+  if (!(knownAgentIds instanceof Set) || knownAgentIds.size === 0) {
+    return {
+      sessions: list,
+      removedSessionKeys: [],
+      removedAgentIds: [],
+    }
+  }
+
+  const sessions = []
+  const removedSessionKeys = []
+  const removedAgentIds = new Set()
+
+  for (const row of list) {
+    const sessionKey = normalizeSessionKeyValue(row?.session_key || row?.sessionKey || row?.key || '')
+    if (!sessionKey) continue
+    const agentId = extractAgentIdFromSessionKey(sessionKey)
+    if (agentId !== 'main' && !knownAgentIds.has(agentId)) {
+      removedSessionKeys.push(sessionKey)
+      removedAgentIds.add(agentId)
+      continue
+    }
+    sessions.push({
+      ...row,
+      session_key: sessionKey,
+      sessionKey: sessionKey,
+    })
+  }
+
+  if (cleanup && removedSessionKeys.length > 0) {
+    await cleanupInvalidSessionAndAgentArtifacts(removedSessionKeys, Array.from(removedAgentIds))
+  }
+
+  return {
+    sessions,
+    removedSessionKeys,
+    removedAgentIds: Array.from(removedAgentIds),
+  }
+}
+
+async function guardSessionKeyWithKnownAgent(rawSessionKey, options = {}) {
+  const cleanup = options.cleanup !== false
+  const sessionKey = normalizeSessionKeyValue(rawSessionKey)
+  const agentId = extractAgentIdFromSessionKey(sessionKey)
+  if (agentId === 'main') {
+    return { allowed: true, sessionKey, agentId }
+  }
+
+  const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+  if (!(knownAgentIds instanceof Set) || knownAgentIds.size === 0) {
+    return { allowed: true, sessionKey, agentId }
+  }
+
+  if (knownAgentIds.has(agentId)) {
+    return { allowed: true, sessionKey, agentId }
+  }
+
+  if (cleanup) {
+    await cleanupInvalidSessionAndAgentArtifacts([sessionKey], [agentId])
+  }
+
+  return {
+    allowed: false,
+    sessionKey,
+    agentId,
+    reason: `智能体不存在: ${agentId}`,
+  }
+}
+
+function getCronTaskId(task) {
+  const id = task?.id ?? task?.jobId ?? task?.job_id ?? task?.taskId ?? task?.task_id
+  return id == null ? '' : String(id).trim()
+}
+
+function getCronTaskAgentId(task) {
+  return String(
+    task?.agentId ||
+    task?.agent_id ||
+    task?.agent_config?.agent_id ||
+    '',
+  ).trim()
+}
+
+function getCronTaskSessionKey(task) {
+  return String(task?.sessionKey || task?.session_key || '').trim()
+}
+
+function collectCronPayloadAgentIds(task) {
+  const refs = new Set()
+  const agentId = String(task?.agentId || task?.agent_id || '').trim()
+  if (agentId) refs.add(agentId)
+
+  const sessionKey = getCronTaskSessionKey(task)
+  if (sessionKey) {
+    const sessionAgentId = extractAgentIdFromSessionKey(sessionKey)
+    if (sessionAgentId) refs.add(sessionAgentId)
+  }
+
+  return Array.from(refs)
+}
+
+async function validateCronPayloadAgentBindings(task) {
+  const refs = collectCronPayloadAgentIds(task)
+  if (refs.length === 0) return { ok: true, invalidAgentIds: [] }
+
+  const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+  if (!(knownAgentIds instanceof Set) || knownAgentIds.size === 0) {
+    return { ok: true, invalidAgentIds: [] }
+  }
+
+  const invalidAgentIds = refs.filter((id) => id !== 'main' && !knownAgentIds.has(id))
+  if (invalidAgentIds.length > 0) {
+    const sessionKey = getCronTaskSessionKey(task)
+    await cleanupInvalidSessionAndAgentArtifacts(
+      sessionKey ? [sessionKey] : [],
+      invalidAgentIds,
+    )
+    return { ok: false, invalidAgentIds }
+  }
+
+  return { ok: true, invalidAgentIds: [] }
+}
+
+async function repairInvalidCronAgentBindings(options = {}) {
+  const disableInvalid = options.disableInvalid !== false
+  const listResult = await wrapGatewayCall('cron.list', { includeDisabled: true }, { silent: true })
+  if (!listResult.success) return listResult
+
+  const tasks = normalizeArray(listResult.data, ['items', 'tasks', 'list', 'jobs'])
+    .filter((task) => task && typeof task === 'object')
+  const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+  if (!(knownAgentIds instanceof Set) || knownAgentIds.size === 0) {
+    return {
+      success: true,
+      data: { checked: tasks.length, fixed: 0, failed: 0, skipped: tasks.length },
+    }
+  }
+
+  const staleSessionKeys = []
+  const staleAgentIds = new Set()
+  const failures = []
+  let fixed = 0
+
+  for (const task of tasks) {
+    const taskId = getCronTaskId(task)
+    if (!taskId) continue
+
+    const agentId = getCronTaskAgentId(task)
+    const sessionKey = normalizeSessionKeyValue(getCronTaskSessionKey(task))
+    const sessionAgentId = extractAgentIdFromSessionKey(sessionKey)
+
+    const invalidAgentId = agentId && agentId !== 'main' && !knownAgentIds.has(agentId)
+    const invalidSessionAgentId = sessionAgentId !== 'main' && !knownAgentIds.has(sessionAgentId)
+    if (!invalidAgentId && !invalidSessionAgentId) continue
+
+    const patch = {}
+    if (disableInvalid) patch.enabled = false
+    if (invalidAgentId) {
+      patch.agentId = null
+      staleAgentIds.add(agentId)
+    }
+    if (invalidSessionAgentId) {
+      patch.sessionKey = 'main'
+      patch.sessionTarget = 'main'
+      staleSessionKeys.push(sessionKey)
+      staleAgentIds.add(sessionAgentId)
+    }
+
+    const updateResult = await wrapGatewayCall(
+      'cron.update',
+      { id: taskId, patch },
+      { silent: true },
+    )
+    if (updateResult.success) {
+      fixed += 1
+    } else {
+      failures.push({
+        id: taskId,
+        error: updateResult.error || '更新失败',
+      })
+    }
+  }
+
+  if (staleSessionKeys.length > 0 || staleAgentIds.size > 0) {
+    await cleanupInvalidSessionAndAgentArtifacts(staleSessionKeys, Array.from(staleAgentIds))
+  }
+
+  return {
+    success: true,
+    data: {
+      checked: tasks.length,
+      fixed,
+      failed: failures.length,
+      failures,
+    },
+  }
+}
+
+async function cleanupInvalidChannelAgentBindings() {
+  const configResult = await api.config.get()
+  if (!configResult.success) return configResult
+
+  const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+  if (!(knownAgentIds instanceof Set) || knownAgentIds.size === 0) {
+    return { success: true, data: { removed: 0, saved: false } }
+  }
+  knownAgentIds.add('default')
+
+  const fullConfig = cloneJsonObject(configResult.data || {})
+  if (!isPlainObject(fullConfig.channels)) {
+    return { success: true, data: { removed: 0, saved: false } }
+  }
+  const channels = fullConfig.channels
+  let removed = 0
+
+  const cleanupArrayOrObjectAccounts = (channelName) => {
+    const channel = channels[channelName]
+    if (!isPlainObject(channel) || channel.accounts == null) return
+
+    if (Array.isArray(channel.accounts)) {
+      const raw = channel.accounts
+      const kept = raw.filter((account) => {
+        const id = String(account?.id || '').trim()
+        return id && knownAgentIds.has(id)
+      })
+      removed += (raw.length - kept.length)
+      channel.accounts = kept
+      return
+    }
+
+    if (isPlainObject(channel.accounts)) {
+      const next = {}
+      for (const [id, account] of Object.entries(channel.accounts)) {
+        const accountId = String(id || '').trim()
+        if (!accountId || !knownAgentIds.has(accountId)) {
+          removed += 1
+          continue
+        }
+        next[accountId] = account
+      }
+      channel.accounts = next
+    }
+  }
+
+  cleanupArrayOrObjectAccounts('telegram')
+  cleanupArrayOrObjectAccounts('discord')
+  cleanupArrayOrObjectAccounts('slack')
+  cleanupArrayOrObjectAccounts('feishu')
+
+  if (removed <= 0) {
+    return { success: true, data: { removed: 0, saved: false } }
+  }
+
+  const saveResult = await api.config.set(fullConfig)
+  if (!saveResult.success) return saveResult
+
+  return {
+    success: true,
+    data: {
+      removed,
+      saved: true,
+    },
+  }
+}
+
 function normalizeAgentIdLike(input) {
   const raw = String(input || '').trim().toLowerCase()
   const cleaned = raw.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
   return cleaned || `agent-${Date.now()}`
+}
+
+function buildIdentityMarkdown(name, emoji = '🤖', avatar = '') {
+  const safeName = String(name || 'Assistant').trim() || 'Assistant'
+  const safeEmoji = String(emoji || '🤖').trim() || '🤖'
+  const safeAvatar = String(avatar || '').trim()
+
+  return `---
+name: ${safeName}
+emoji: "${safeEmoji}"
+${safeAvatar ? `avatar: "${safeAvatar}"\n` : ''}---
+
+# 身份信息
+
+这个文件定义了智能体的基本身份信息。`
 }
 
 function toSessionRow(item) {
@@ -619,11 +1195,20 @@ function toSessionRow(item) {
       session_id: null,
       created_at: null,
       updated_at: null,
+      message_count: 0,
+      title: sessionKey === 'main' ? '默认会话' : sessionKey,
     }
   }
 
   const row = item && typeof item === 'object' ? item : {}
   const sessionKey = row?.session_key || row?.sessionKey || row?.key || ''
+  const rawCount =
+    row?.message_count ??
+    row?.messageCount ??
+    row?.count ??
+    row?.total_messages ??
+    0
+  const numericCount = Number(rawCount)
   return {
     ...row,
     session_key: sessionKey,
@@ -631,6 +1216,8 @@ function toSessionRow(item) {
     session_id: row?.session_id || row?.sessionId || null,
     created_at: row?.created_at || row?.createdAt || row?.updated_at || row?.updatedAt || null,
     updated_at: row?.updated_at || row?.updatedAt || null,
+    message_count: Number.isFinite(numericCount) ? numericCount : 0,
+    title: row?.title || row?.name || row?.label || row?.session_name || '未命名会话',
   }
 }
 
@@ -1454,6 +2041,17 @@ const api = {
   // ========== 配置相关 ==========
   config: {
     get: async () => {
+      // Tauri 环境优先直接读取本地配置文件，避免 Gateway 返回裁剪/包装配置导致字段丢失
+      if (isTauriRuntime()) {
+        try {
+          const configJson = await invokeTauri('get_openclaw_config')
+          const parsed = JSON.parse(configJson || '{}')
+          return { success: true, data: normalizeConfigForUi(parsed) }
+        } catch (tauriError) {
+          console.warn('[API] get_openclaw_config 失败，回退 Gateway config.get:', tauriError)
+        }
+      }
+
       const result = await wrapGatewayCall('config.get', {})
       if (result.success) {
         result.data = normalizeConfigForUi(result.data)
@@ -1490,6 +2088,7 @@ const api = {
     },
     // 兼容旧页面调用：当前版本配置通过 config.set 已落盘，Gateway 侧暂无独立 sync 方法
     syncToGateway: async () => ({ success: true, data: { synced: true } }),
+    cleanupInvalidChannelAgentBindings: async () => cleanupInvalidChannelAgentBindings(),
   },
 
   // ========== 网关相关 ==========
@@ -1539,12 +2138,22 @@ const api = {
   // ========== 会话相关 ==========
   sessions: {
     list: async (agentId) => {
+      const safeAgentId = typeof agentId === 'string' ? agentId.trim() : ''
+      if (safeAgentId && safeAgentId !== 'main') {
+        const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+        if ((knownAgentIds instanceof Set) && knownAgentIds.size > 0 && !knownAgentIds.has(safeAgentId)) {
+          await cleanupInvalidSessionAndAgentArtifacts([], [safeAgentId])
+          return { success: true, data: [] }
+        }
+      }
+
       const params = {}
-      if (agentId) params.agentId = agentId
+      if (safeAgentId) params.agentId = safeAgentId
       const result = await wrapGatewayCall('sessions.list', params)
       if (result.success) {
         const rows = normalizeArray(result.data, ['sessions', 'items', 'list']).map(toSessionRow)
-        result.data = rows
+        const filtered = await filterSessionsByKnownAgents(rows, { cleanup: true })
+        result.data = filtered.sessions
       }
       return result
     },
@@ -1556,9 +2165,30 @@ const api = {
       }
       return result
     },
-    get: async (sessionKey) => wrapGatewayCall('sessions.get', { key: sessionKey, sessionKey }),
+    get: async (sessionKey) => {
+      const guard = await guardSessionKeyWithKnownAgent(sessionKey, { cleanup: true })
+      if (!guard.allowed) {
+        return {
+          success: true,
+          data: null,
+          skipped: true,
+          reason: guard.reason,
+        }
+      }
+      return wrapGatewayCall('sessions.get', { key: guard.sessionKey })
+    },
     getMessages: async (sessionKey) => {
-      const result = await wrapGatewayCall('chat.history', { sessionKey })
+      const guard = await guardSessionKeyWithKnownAgent(sessionKey, { cleanup: true })
+      if (!guard.allowed) {
+        return {
+          success: true,
+          data: [],
+          skipped: true,
+          reason: guard.reason,
+        }
+      }
+
+      const result = await wrapGatewayCall('chat.history', { sessionKey: guard.sessionKey })
       if (result.success) {
         result.data = normalizeArray(result.data, ['messages', 'items'])
       }
@@ -1567,6 +2197,14 @@ const api = {
     // Gateway 当前版本无 sessions.create；会话在 chat.send 时自动创建
     create: async (agentId, sessionName) => {
       const safeAgent = String(agentId || 'main').trim() || 'main'
+      if (safeAgent !== 'main') {
+        const knownAgentIds = await getKnownAgentIdSet({ allowStale: true })
+        if ((knownAgentIds instanceof Set) && knownAgentIds.size > 0 && !knownAgentIds.has(safeAgent)) {
+          await cleanupInvalidSessionAndAgentArtifacts([], [safeAgent])
+          return { success: false, error: `智能体不存在: ${safeAgent}` }
+        }
+      }
+
       const rawName = String(sessionName || 'main').trim() || 'main'
       const normalized = rawName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')
       const sessionKey = safeAgent === 'main'
@@ -1580,17 +2218,73 @@ const api = {
       }
       return { success: true, data: sessionKey }
     },
-    delete: (sessionKey) => wrapGatewayCall('sessions.delete', { key: sessionKey, sessionKey }),
-    deleteSingle: (sessionKey) => wrapGatewayCall('sessions.delete', { key: sessionKey, sessionKey }),
+    delete: async (sessionKey) => {
+      const result = await wrapGatewayCall('sessions.delete', { key: sessionKey }, { silent: true })
+      if (result.success) {
+        const deleted = result.data?.deleted
+        if (deleted === false && isTauriRuntime()) {
+          try {
+            const localResult = await invokeTauri('purge_local_session_key', { sessionKey })
+            const removedCount = Number(localResult?.removed_count ?? localResult?.removedCount ?? 0)
+            if (Number.isFinite(removedCount) && removedCount > 0) {
+              return {
+                success: true,
+                data: {
+                  ...(result.data || {}),
+                  deleted: true,
+                  forced: true,
+                  local: localResult,
+                },
+              }
+            }
+          } catch (tauriError) {
+            console.warn('[API] purge_local_session_key 失败:', tauriError)
+          }
+        }
+        return result
+      }
+
+      const message = String(result.error || '').toLowerCase()
+      const isNotFound = message.includes('not found') || message.includes('不存在') || message.includes('no such')
+      if (isNotFound) {
+        return { success: true, data: { ok: true, alreadyDeleted: true } }
+      }
+
+      return handleError(new Error(result.error || '删除会话失败'), {
+        method: 'sessions.delete',
+      })
+    },
+    deleteSingle: async (sessionKey) => api.sessions.delete(sessionKey),
     clearAll: () => Promise.resolve({ success: true, data: { ok: true } }),
+    cleanupInvalidAgentReferences: async () => {
+      const result = await wrapGatewayCall('sessions.list', {}, { silent: true })
+      if (!result.success) return result
+
+      const rows = normalizeArray(result.data, ['sessions', 'items', 'list']).map(toSessionRow)
+      const filtered = await filterSessionsByKnownAgents(rows, { cleanup: true })
+      return {
+        success: true,
+        data: {
+          total: rows.length,
+          removed: filtered.removedSessionKeys.length,
+          removedAgents: filtered.removedAgentIds,
+        },
+      }
+    },
   },
 
   // ========== 聊天相关 ==========
   chat: {
     send: async (params) => {
       const { payload, sessionKey, model } = normalizeChatSendParams(params)
+      const guard = await guardSessionKeyWithKnownAgent(sessionKey, { cleanup: true })
+      if (!guard.allowed) {
+        return { success: false, error: `会话绑定的智能体不存在：${guard.agentId}` }
+      }
+      payload.sessionKey = guard.sessionKey
+
       if (model) {
-        await wrapGatewayCall('sessions.patch', { key: sessionKey, model }, { silent: true })
+        await wrapGatewayCall('sessions.patch', { key: guard.sessionKey, model }, { silent: true })
       }
       return wrapGatewayCall('chat.send', payload)
     },
@@ -1603,7 +2297,13 @@ const api = {
       return result
     },
     abort: (sessionKey, runId) => wrapGatewayCall('chat.abort', { sessionKey, runId }),
-    history: (sessionKey, options) => wrapGatewayCall('chat.history', { sessionKey, ...options }),
+    history: async (sessionKey, options) => {
+      const guard = await guardSessionKeyWithKnownAgent(sessionKey, { cleanup: true })
+      if (!guard.allowed) {
+        return { success: true, data: [] }
+      }
+      return wrapGatewayCall('chat.history', { sessionKey: guard.sessionKey, ...options })
+    },
   },
 
   // ========== 智能体相关 ==========
@@ -1657,20 +2357,129 @@ const api = {
       }
       return result
     },
-    create: (params) => {
+    create: async (params) => {
       const payload = { ...(params || {}) }
-      const name = typeof payload.name === 'string' && payload.name.trim()
+      const requestedName = typeof payload.name === 'string' && payload.name.trim()
         ? payload.name.trim()
         : 'new-agent'
+      const normalizedAgentId = normalizeAgentIdLike(requestedName)
 
-      if (typeof payload.workspace !== 'string' || !payload.workspace.trim()) {
-        payload.workspace = `~/.openclaw/agents/${normalizeAgentIdLike(name)}`
+      if (normalizedAgentId === 'main') {
+        return {
+          success: false,
+          error: `名称「${requestedName}」会被解析为保留 ID「main」，请换一个名称（例如：my-main-agent）`,
+        }
       }
 
-      return wrapGatewayCall('agents.create', payload)
+      // 创建时始终使用安全 agentId（网关会把 name 作为 agentId 归一化）。
+      payload.name = normalizedAgentId
+
+      if (typeof payload.workspace !== 'string' || !payload.workspace.trim()) {
+        payload.workspace = `~/.openclaw/agents/${normalizedAgentId}`
+      }
+
+      if (typeof payload.avatar !== 'string') {
+        delete payload.avatar
+      } else {
+        payload.avatar = payload.avatar.trim()
+      }
+
+      if (typeof payload.emoji !== 'string') {
+        delete payload.emoji
+      } else {
+        payload.emoji = payload.emoji.trim()
+      }
+
+      const result = await wrapGatewayCall('agents.create', payload)
+      if (!result.success) {
+        const message = String(result.error || '')
+        if (message.includes('"main" is reserved')) {
+          return {
+            success: false,
+            error: `名称「${requestedName}」会被解析为保留 ID「main」，请换一个名称（例如：my-main-agent）`,
+          }
+        }
+        return result
+      }
+
+      const data = result.data && typeof result.data === 'object' ? result.data : {}
+      const agentId = String(data.agentId || data.agent_id || data.id || '').trim()
+      if (!agentId) return result
+
+      result.data = {
+        ...data,
+        id: agentId,
+        agentId,
+        agent_id: agentId,
+      }
+
+      // 若用户输入的是展示名（如中文），写入 IDENTITY.md 以便列表显示真实名称。
+      if (requestedName && requestedName !== normalizedAgentId) {
+        const identityContent = buildIdentityMarkdown(
+          requestedName,
+          payload.emoji || '🤖',
+          payload.avatar || '',
+        )
+        try {
+          const savedLocal = await saveLocalWorkspaceFileFromTauri(agentId, 'IDENTITY.md', identityContent)
+          if (!savedLocal) {
+            await wrapGatewayCall(
+              'workspace.saveFile',
+              { agentId, fileName: 'IDENTITY.md', content: identityContent },
+              { silent: true },
+            )
+          } else {
+            // 最佳努力同步到 Gateway，失败不影响创建成功。
+            await wrapGatewayCall(
+              'workspace.saveFile',
+              { agentId, fileName: 'IDENTITY.md', content: identityContent },
+              { silent: true },
+            )
+          }
+          result.data.displayName = requestedName
+        } catch (err) {
+          console.warn('[API] 写入新智能体 IDENTITY.md 失败（忽略）:', err)
+        }
+      }
+
+      return result
     },
     update: (agentId, params) => wrapGatewayCall('agents.update', { agentId, ...params }),
-    delete: (agentId) => wrapGatewayCall('agents.delete', { agentId }),
+    delete: async (agentId) => {
+      const safeAgentId = String(agentId || '').trim()
+      if (!safeAgentId) {
+        return { success: false, error: '缺少 agentId' }
+      }
+
+      const result = await wrapGatewayCall('agents.delete', { agentId: safeAgentId }, { silent: true })
+      if (result.success) return result
+
+      const message = String(result.error || '').toLowerCase()
+      const isNotFound = message.includes('not found') || message.includes('不存在') || message.includes('no such')
+      const isUnknownMethod = message.includes('unknown method') || message.includes('method not found')
+
+      // Gateway 中不存在该智能体时，回退删除本地遗留目录（agents/<id>, workspace-<id>）
+      if ((isNotFound || isUnknownMethod) && isTauriRuntime()) {
+        try {
+          const localResult = await invokeTauri('delete_local_agent_data', { agentId: safeAgentId })
+          return {
+            success: true,
+            data: {
+              ok: true,
+              gatewayDeleted: false,
+              localDeleted: true,
+              local: localResult,
+            },
+          }
+        } catch (tauriError) {
+          return handleError(tauriError, { method: 'delete_local_agent_data' })
+        }
+      }
+
+      return handleError(new Error(result.error || '删除智能体失败'), {
+        method: 'agents.delete',
+      })
+    },
     // 智能体文件
     files: {
       list: (agentId) => wrapGatewayCall('agents.files.list', { agentId }),
@@ -1728,21 +2537,42 @@ const api = {
 
   // ========== 定时任务相关 ==========
   cron: {
-    list: () => wrapGatewayCall('cron.list', {}),
-    get: (taskId) => wrapGatewayCall('cron.status', { id: taskId, jobId: taskId }),
-    create: (task) => wrapGatewayCall('cron.add', task || {}),
-    update: (taskId, task) => wrapGatewayCall('cron.update', { id: taskId, patch: task || {} }),
-    delete: (taskId) => wrapGatewayCall('cron.remove', { id: taskId, jobId: taskId }),
+    list: () => wrapGatewayCall('cron.list', { includeDisabled: true }),
+    get: () => wrapGatewayCall('cron.status', {}),
+    create: async (task) => {
+      const payload = sanitizeCronCreateInput(task || {})
+      const validation = await validateCronPayloadAgentBindings(payload)
+      if (!validation.ok) {
+        return {
+          success: false,
+          error: `定时任务绑定了不存在的智能体: ${validation.invalidAgentIds.join(', ')}`,
+        }
+      }
+      return wrapGatewayCall('cron.add', payload)
+    },
+    update: async (taskId, task) => {
+      const patch = sanitizeCronUpdatePatch(task || {})
+      const validation = await validateCronPayloadAgentBindings(patch)
+      if (!validation.ok) {
+        return {
+          success: false,
+          error: `定时任务绑定了不存在的智能体: ${validation.invalidAgentIds.join(', ')}`,
+        }
+      }
+      return wrapGatewayCall('cron.update', { id: taskId, patch })
+    },
+    delete: (taskId) => wrapGatewayCall('cron.remove', { id: taskId }),
     toggle: async (taskId) => {
       const listResult = await wrapGatewayCall('cron.list', { includeDisabled: true })
       if (!listResult.success) return listResult
-      const items = normalizeArray(listResult.data, ['items', 'tasks', 'list'])
+      const items = normalizeArray(listResult.data, ['items', 'tasks', 'list', 'jobs'])
       const current = items.find((item) => item?.id === taskId || item?.jobId === taskId)
       if (!current) return { success: false, error: '任务不存在' }
       return wrapGatewayCall('cron.update', { id: taskId, patch: { enabled: !current.enabled } })
     },
-    runNow: (taskId) => wrapGatewayCall('cron.run', { id: taskId, jobId: taskId, mode: 'force' }),
+    runNow: (taskId) => wrapGatewayCall('cron.run', { id: taskId, mode: 'force' }),
     history: () => wrapGatewayCall('cron.runs', { scope: 'all', limit: 100 }),
+    repairInvalidAgentBindings: (options = {}) => repairInvalidCronAgentBindings(options),
   },
 
   // ========== 记忆相关 ==========

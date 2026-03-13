@@ -12,6 +12,8 @@ import TelegramChannelConfig from './TelegramChannelConfig'
 import DiscordChannelConfig from './DiscordChannelConfig'
 import SlackChannelConfig from './SlackChannelConfig'
 import FeishuChannelConfig from './FeishuChannelConfig'
+import api from '@/lib/api'
+import { toast } from '@/hooks/useToast'
 
 // 通道状态概览卡片
 function ChannelOverview({ autoReplyStatus, wechatStatus, onRefresh }) {
@@ -77,6 +79,23 @@ export default function ChannelManager() {
   const [autoReplyStatus, setAutoReplyStatus] = useState(null)
   const [wechatStatus, setWechatStatus] = useState(null)
 
+  const cleanupInvalidChannelAgents = async () => {
+    try {
+      const result = await api.config.cleanupInvalidChannelAgentBindings()
+      if (!result.success) {
+        toast.error('通道清理失败', result.error || '保存配置失败')
+        return
+      }
+
+      const removedTotal = Number(result?.data?.removed || 0)
+      if (removedTotal > 0) {
+        toast.success('通道配置已清理', `已移除 ${removedTotal} 个无效智能体绑定`)
+      }
+    } catch (error) {
+      console.error('清理无效通道智能体失败:', error)
+    }
+  }
+
   // 加载状态
   const loadStatus = async () => {
     // 自动回复状态会由 AutoReply 组件内部管理
@@ -84,7 +103,9 @@ export default function ChannelManager() {
   }
 
   useEffect(() => {
-    loadStatus()
+    cleanupInvalidChannelAgents().finally(() => {
+      loadStatus()
+    })
   }, [])
 
   return (

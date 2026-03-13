@@ -60,6 +60,181 @@ export default function Schedule() {
     return Object.values(value).filter(item => item && typeof item === 'object')
   }
 
+  const normalizeTaskForUi = (task) => {
+    const rawTask = task && typeof task === 'object' ? task : {}
+    const schedule = rawTask.schedule && typeof rawTask.schedule === 'object' ? rawTask.schedule : {}
+    const rawState = rawTask.state && typeof rawTask.state === 'object' ? rawTask.state : null
+
+    const normalizedState = rawState
+      ? {
+          ...rawState,
+          last_status: rawState.last_status ?? rawState.lastRunStatus ?? rawState.lastStatus ?? null,
+          next_run_at_ms: rawState.next_run_at_ms ?? rawState.nextRunAtMs ?? null,
+          run_count: rawState.run_count ?? rawState.runCount ?? 0,
+        }
+      : null
+
+    return {
+      ...rawTask,
+      schedule_kind: rawTask.schedule_kind || schedule.kind || 'cron',
+      cron_expression: rawTask.cron_expression || rawTask.cron || schedule.expr || '',
+      cron: rawTask.cron || rawTask.cron_expression || schedule.expr || '',
+      every_ms: rawTask.every_ms ?? schedule.everyMs ?? null,
+      run_at: rawTask.run_at || schedule.at || schedule.runAt || null,
+      agent_id: rawTask.agent_id || rawTask.agentId || rawTask.agent_config?.agent_id || '',
+      action: rawTask.parameters?.action
+        || rawTask.action
+        || (rawTask.payload?.kind === 'systemEvent' ? 'reminder' : 'chat'),
+      message: rawTask.parameters?.message || rawTask.message || rawTask.payload?.message || rawTask.payload?.text || '',
+      target: rawTask.parameters?.target || rawTask.target || rawTask.payload?.model || '',
+      delete_after_run: rawTask.delete_after_run ?? rawTask.deleteAfterRun ?? false,
+      session_key: rawTask.session_key || rawTask.sessionKey || '',
+      session_target: rawTask.session_target || rawTask.sessionTarget || 'main',
+      wake_mode: rawTask.wake_mode || rawTask.wakeMode || 'now',
+      state: normalizedState,
+    }
+  }
+
+  const normalizeHistoryEntryForUi = (entry) => {
+    const row = entry && typeof entry === 'object' ? entry : {}
+    const taskId = row.task_id || row.taskId || row.jobId || ''
+    const executedAt = row.executed_at || row.executedAt || (row.runAtMs ? new Date(row.runAtMs).toISOString() : null)
+
+    return {
+      ...row,
+      task_id: String(taskId || ''),
+      executed_at: executedAt,
+      duration_ms: row.duration_ms ?? row.durationMs ?? 0,
+      session_id: row.session_id || row.sessionId || null,
+    }
+  }
+
+  const formatDateTimeLocalValue = (value) => {
+    if (!value) return ''
+    const ms = typeof value === 'number' ? value : Date.parse(value)
+    if (!Number.isFinite(ms)) return ''
+    const date = new Date(ms)
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    const hour = String(date.getHours()).padStart(2, '0')
+    const minute = String(date.getMinutes()).padStart(2, '0')
+    return `${year}-${month}-${day}T${hour}:${minute}`
+  }
+
+  const buildGatewaySchedule = (rawForm) => {
+    const scheduleKind = rawForm?.schedule_kind || 'cron'
+
+    if (scheduleKind === 'every') {
+      const amount = Math.max(1, Number.parseInt(String(rawForm?.every_amount || '1'), 10) || 1)
+      const unit = rawForm?.every_unit || 'minutes'
+      const multiplier = unit === 'days' ? 86400000 : (unit === 'hours' ? 3600000 : 60000)
+      return { kind: 'every', everyMs: amount * multiplier }
+    }
+
+    if (scheduleKind === 'at') {
+      const runAtInput = String(rawForm?.run_at || '').trim()
+      const runAtMs = Date.parse(runAtInput)
+      if (!Number.isFinite(runAtMs)) {
+        throw new Error('指定时间格式无效')
+      }
+      return { kind: 'at', at: new Date(runAtMs).toISOString() }
+    }
+
+    const expr = String(rawForm?.cron || '').trim()
+    if (!expr) {
+      throw new Error('Cron 表达式不能为空')
+    }
+    return { kind: 'cron', expr }
+  }
+
+  const buildCronPayloadFromForm = (rawForm, options = {}) => {
+    const existingTask = options.existingTask || null
+    const name = String(rawForm?.name || '').trim()
+    const description = String(rawForm?.description || '').trim()
+    const rawMessage = String(rawForm?.message || '').trim()
+    const message = rawMessage || description || name
+    const model = String(rawForm?.target || '').trim()
+    const agentId = String(rawForm?.agent_id || '').trim()
+    const hasExistingAgent = Boolean(existingTask?.agentId || existingTask?.agent_id || existingTask?.agent_config?.agent_id)
+    const warnings = []
+    let sessionTarget = rawForm?.session_target === 'isolated' ? 'isolated' : 'main'
+    const wakeMode = rawForm?.wake_mode === 'now' ? 'now' : 'next-heartbeat'
+
+    if (!name) {
+      throw new Error('任务名称不能为空')
+    }
+
+    if (sessionTarget === 'main' && agentId && agentId !== 'main') {
+      // Gateway 约束：main 会话仅支持默认智能体；非 main 智能体必须 isolated。
+      sessionTarget = 'isolated'
+      warnings.push('非默认智能体不支持主会话，已自动切换为独立会话')
+    }
+
+    const payloadBody = sessionTarget === 'main'
+      ? {
+          kind: 'systemEvent',
+          text: message,
+        }
+      : {
+          kind: 'agentTurn',
+          message,
+          ...(model ? { model } : {}),
+      }
+
+    const requestedSessionKey = String(rawForm?.session_key || '').trim()
+    const defaultAgentId = String((agentId || 'main')).trim() || 'main'
+    const sessionKey = sessionTarget === 'main'
+      ? (requestedSessionKey || 'main')
+      : (requestedSessionKey || `agent:${defaultAgentId}:main`)
+
+    const payload = {
+      name,
+      description: description || undefined,
+      enabled: rawForm?.enabled !== false,
+      deleteAfterRun: Boolean(rawForm?.delete_after_run),
+      schedule: buildGatewaySchedule(rawForm),
+      sessionKey,
+      sessionTarget,
+      wakeMode,
+      payload: payloadBody,
+    }
+
+    // 为 isolated 任务显式设置 delivery，避免网关回落到“last route”造成随机串到 Telegram。
+    if (sessionTarget === 'isolated') {
+      const deliveryMode = String(rawForm?.delivery_mode || '').trim().toLowerCase()
+      const telegramChatId = String(rawForm?.delivery_to || '').trim()
+
+      if (deliveryMode === 'telegram') {
+        if (!telegramChatId) {
+          throw new Error('Telegram 推送需要填写 chatId')
+        }
+        payload.delivery = {
+          mode: 'announce',
+          channel: 'telegram',
+          to: telegramChatId,
+        }
+      } else {
+        payload.delivery = { mode: 'none' }
+      }
+    }
+
+    if (sessionTarget === 'main') {
+      if (agentId === 'main') {
+        payload.agentId = 'main'
+      } else if (existingTask && hasExistingAgent) {
+        payload.agentId = null
+      }
+    } else if (agentId) {
+      payload.agentId = agentId
+    } else if (existingTask && hasExistingAgent) {
+      // 编辑时从“绑定智能体”切到“无绑定”，需要显式传 null 以清除旧值
+      payload.agentId = null
+    }
+
+    return { payload, warnings }
+  }
+
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -74,8 +249,11 @@ export default function Schedule() {
     target: '',
     message: '',
     agent_id: '',
+    session_key: '',
     session_target: 'main',
-    wake_mode: 'next-heartbeat'
+    wake_mode: 'next-heartbeat',
+    delivery_mode: 'none',
+    delivery_to: '',
   })
 
   useEffect(() => {
@@ -127,21 +305,24 @@ export default function Schedule() {
     const result = await api.cron.list()
     if (result.success) {
       console.log('📋 加载结果:', result.data)
-      const rawTasks = normalizeArray(result.data, ['tasks', 'items', 'list'])
+      const rawTasks = normalizeArray(result.data, ['tasks', 'items', 'list', 'jobs'])
       const seenKeys = new Set()
-      const normalizedTasks = rawTasks.map((task, index) => {
+      const normalizedTasks = rawTasks
+        .filter(task => task && typeof task === 'object' && !Array.isArray(task))
+        .map((task, index) => {
+        const normalizedTask = normalizeTaskForUi(task)
         const baseId =
-          task?.id ??
-          task?.jobId ??
-          task?.job_id ??
-          task?.taskId ??
-          task?.task_id ??
+          normalizedTask?.id ??
+          normalizedTask?.jobId ??
+          normalizedTask?.job_id ??
+          normalizedTask?.taskId ??
+          normalizedTask?.task_id ??
           null
 
         const normalizedId = baseId != null ? String(baseId) : null
         const keySeed =
           normalizedId ||
-          String(task?.name || '').trim() ||
+          String(normalizedTask?.name || '').trim() ||
           `task-${index}`
 
         let uiKey = keySeed
@@ -153,11 +334,12 @@ export default function Schedule() {
         seenKeys.add(uiKey)
 
         return {
-          ...task,
+          ...normalizedTask,
           id: normalizedId,
           _uiKey: uiKey,
         }
       })
+        .filter(task => task && task.id)
       setTasks(normalizedTasks)
     } else {
       console.error('加载定时任务失败:', result.error)
@@ -171,8 +353,10 @@ export default function Schedule() {
     // 🆕 使用统一 API 服务层
     const result = await api.cron.history()
     if (result.success) {
-      const records = normalizeArray(result.data, ['history', 'items', 'records'])
-      const taskHistory = records.filter(r => r.task_id === taskId || r.taskId === taskId)
+      const records = normalizeArray(result.data, ['history', 'items', 'records', 'entries'])
+        .map(normalizeHistoryEntryForUi)
+      const targetTaskId = String(taskId || '')
+      const taskHistory = records.filter(r => r.task_id === targetTaskId)
       setHistory(taskHistory)
       setShowHistory(taskId)
     } else {
@@ -184,21 +368,32 @@ export default function Schedule() {
   const saveTask = async () => {
     setIsLoading(true)
     console.log('📋 保存任务:', { editingTask, formData })
-    let result
-    if (editingTask) {
-      console.log('📋 更新任务 ID:', editingTask.id)
-      result = await api.cron.update(editingTask.id, formData)
-    } else {
-      console.log('📋 创建新任务')
-      result = await api.cron.create(formData)
-    }
-    if (result.success) {
-      await loadTasks()
-      closeModal()
-      toast.success(editingTask ? '更新成功' : '创建成功', '定时任务已保存')
-    } else {
-      console.error('❌ 保存失败:', result.error)
-      toast.error('保存失败', result.error)
+    try {
+      const { payload, warnings } = buildCronPayloadFromForm(formData, { existingTask: editingTask })
+      if (warnings.length > 0) {
+        toast.warning('已自动调整任务参数', warnings.join('；'))
+      }
+      let result
+      if (editingTask) {
+        console.log('📋 更新任务 ID:', editingTask.id)
+        result = await api.cron.update(editingTask.id, payload)
+      } else {
+        console.log('📋 创建新任务')
+        result = await api.cron.create(payload)
+      }
+
+      if (result.success) {
+        await loadTasks()
+        closeModal()
+        toast.success(editingTask ? '更新成功' : '创建成功', '定时任务已保存')
+      } else {
+        console.error('❌ 保存失败:', result.error)
+        toast.error('保存失败', result.error)
+      }
+    } catch (error) {
+      const message = error?.message || '参数无效'
+      console.error('❌ 保存失败:', error)
+      toast.error('保存失败', message)
     }
     setIsLoading(false)
   }
@@ -257,30 +452,45 @@ export default function Schedule() {
       target: '',
       message: '',
       agent_id: '',
+      session_key: '',
       session_target: 'main',
-      wake_mode: 'next-heartbeat'
+      wake_mode: 'next-heartbeat',
+      delivery_mode: 'none',
+      delivery_to: '',
     })
     setEditingTask(null)
     setShowModal(true)
   }
 
   const openEditModal = (task) => {
+    const everyMs = task.every_ms ?? task.schedule?.everyMs
+
+    const delivery = task?.delivery && typeof task.delivery === 'object' ? task.delivery : {}
+    const normalizedDeliveryMode = String(delivery.mode || '').trim().toLowerCase()
+    const normalizedDeliveryChannel = String(delivery.channel || '').trim().toLowerCase()
+    const telegramDeliveryEnabled = normalizedDeliveryMode === 'announce'
+      && normalizedDeliveryChannel === 'telegram'
+      && String(delivery.to || '').trim().length > 0
+
     setFormData({
       name: task.name,
       description: task.description,
-      schedule_kind: task.schedule_kind || 'cron',
-      cron: task.cron_expression || task.cron || '0 * * * *',
-      every_amount: task.every_ms ? Math.floor(task.every_ms / 60000) : 1,
+      schedule_kind: task.schedule_kind || task.schedule?.kind || 'cron',
+      cron: task.cron_expression || task.cron || task.schedule?.expr || '0 * * * *',
+      every_amount: everyMs ? Math.max(1, Math.floor(everyMs / 60000)) : 1,
       every_unit: 'minutes',
-      run_at: task.run_at || '',
-      enabled: task.enabled,
+      run_at: formatDateTimeLocalValue(task.run_at || task.schedule?.at || task.schedule?.runAt || ''),
+      enabled: task.enabled !== false,
       delete_after_run: task.delete_after_run || false,
-      action: task.parameters?.action || task.action || 'chat',
-      target: task.parameters?.target || task.target || '',
-      message: task.parameters?.message || task.message || '',
-      agent_id: task.agent_config?.agent_id || task.agent_id || '',
-      session_target: task.session_target || 'main',
-      wake_mode: task.wake_mode || 'now'
+      action: task.parameters?.action || task.action || (task.payload?.kind === 'systemEvent' ? 'reminder' : 'chat'),
+      target: task.parameters?.target || task.target || task.payload?.model || '',
+      message: task.parameters?.message || task.message || task.payload?.message || task.payload?.text || '',
+      agent_id: task.agent_config?.agent_id || task.agent_id || task.agentId || '',
+      session_key: task.session_key || task.sessionKey || '',
+      session_target: task.session_target || task.sessionTarget || 'main',
+      wake_mode: task.wake_mode || task.wakeMode || 'next-heartbeat',
+      delivery_mode: telegramDeliveryEnabled ? 'telegram' : 'none',
+      delivery_to: telegramDeliveryEnabled ? String(delivery.to || '') : '',
     })
     setEditingTask(task)
     setShowModal(true)
@@ -321,17 +531,30 @@ export default function Schedule() {
 
   // 获取调度显示文本
   const getScheduleDisplay = (task) => {
-    switch (task.schedule_kind) {
+    const scheduleKind = task.schedule_kind || task.schedule?.kind
+
+    switch (scheduleKind) {
       case 'every':
-        const ms = task.every_ms || 60000
+        const ms = task.every_ms || task.schedule?.everyMs || 60000
         const mins = Math.floor(ms / 60000)
         if (mins < 60) return `每 ${mins} 分钟`
         if (mins < 1440) return `每 ${Math.floor(mins / 60)} 小时`
         return `每 ${Math.floor(mins / 1440)} 天`
-      case 'at':
-        return task.run_at ? `于 ${new Date(task.run_at).toLocaleString('zh-CN')}` : '指定时间'
+      case 'at': {
+        const runAt = task.run_at || task.schedule?.at || task.schedule?.runAt
+        if (runAt) {
+          const ts = typeof runAt === 'number' ? runAt : new Date(runAt).getTime()
+          if (Number.isFinite(ts)) {
+            return `于 ${new Date(ts).toLocaleString('zh-CN')}`
+          }
+        }
+        if (Number.isFinite(task.schedule?.runAtMs)) {
+          return `于 ${new Date(task.schedule.runAtMs).toLocaleString('zh-CN')}`
+        }
+        return '指定时间'
+      }
       default:
-        return task.cron_expression || task.cron
+        return task.cron_expression || task.cron || task.schedule?.expr || '未设置'
     }
   }
 
@@ -440,8 +663,8 @@ export default function Schedule() {
                     <div className="flex items-center gap-2 mt-1.5 text-[10px] text-foreground-tertiary flex-wrap">
                       {/* 调度类型图标 */}
                       <span className="flex items-center gap-1 bg-surface-elevated px-1.5 py-0.5 rounded">
-                        {task.schedule_kind === 'every' ? <Repeat className="w-2.5 h-2.5" /> :
-                         task.schedule_kind === 'at' ? <Calendar className="w-2.5 h-2.5" /> :
+                        {(task.schedule_kind || task.schedule?.kind) === 'every' ? <Repeat className="w-2.5 h-2.5" /> :
+                         (task.schedule_kind || task.schedule?.kind) === 'at' ? <Calendar className="w-2.5 h-2.5" /> :
                          <Timer className="w-2.5 h-2.5" />}
                         <span className="font-mono">{getScheduleDisplay(task)}</span>
                       </span>
@@ -540,7 +763,7 @@ export default function Schedule() {
                        entry.status === 'error' ? '失败' : '跳过'}
                     </span>
                     <span className="text-xs text-foreground-tertiary">
-                      {formatMs(new Date(entry.executed_at).getTime())}
+                      {entry.executed_at ? formatMs(new Date(entry.executed_at).getTime()) : 'n/a'}
                     </span>
                   </div>
                   {entry.summary && (
@@ -738,6 +961,34 @@ export default function Schedule() {
                 </Select>
               </div>
             </div>
+
+            {formData.session_target === 'isolated' && (
+              <div className="space-y-2 rounded-md border border-border-subtle bg-surface-elevated/40 p-2">
+                <div>
+                  <Label className="text-xs text-foreground-tertiary">执行结果推送</Label>
+                  <Select value={formData.delivery_mode} onValueChange={(value) => setFormData({ ...formData, delivery_mode: value })}>
+                    <SelectTrigger className="mt-1 h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">仅内部执行（推荐）</SelectItem>
+                      <SelectItem value="telegram">推送到 Telegram</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {formData.delivery_mode === 'telegram' && (
+                  <div>
+                    <Label className="text-xs text-foreground-tertiary">Telegram chatId</Label>
+                    <Input
+                      value={formData.delivery_to}
+                      onChange={(e) => setFormData({ ...formData, delivery_to: e.target.value })}
+                      placeholder="例如: 8082835829 或 -1001234567890"
+                      className="mt-1 h-9"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
 
             {formData.action === 'chat' && (
               <>

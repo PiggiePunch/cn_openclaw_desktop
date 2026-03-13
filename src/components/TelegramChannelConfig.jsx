@@ -24,13 +24,18 @@ import api from '@/lib/api'
 import { toast } from '@/hooks/useToast'
 
 // Telegram 账户配置组件
-function TelegramAccountCard({ account, onEdit, onDelete, onToggle }) {
+function TelegramAccountCard({ account, displayName, onEdit, onDelete, onToggle }) {
   return (
     <Card className="mb-3">
       <CardHeader className="pb-2 py-3">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <CardTitle className="text-base">{account.id}</CardTitle>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="min-w-0">
+              <CardTitle className="text-base truncate">{displayName || account.id}</CardTitle>
+              {displayName && displayName !== account.id && (
+                <p className="text-xs text-muted-foreground truncate">ID: {account.id}</p>
+              )}
+            </div>
             {account.enabled ? (
               <Badge variant="default" className="bg-green-500">已启用</Badge>
             ) : (
@@ -87,7 +92,7 @@ function TelegramAccountCard({ account, onEdit, onDelete, onToggle }) {
 }
 
 // 账户编辑对话框
-function AccountDialog({ open, onOpenChange, account, onSave, title }) {
+function AccountDialog({ open, onOpenChange, account, onSave, title, agentOptions = [] }) {
   const [formData, setFormData] = useState({
     id: '',
     bot_token: '',
@@ -119,6 +124,8 @@ function AccountDialog({ open, onOpenChange, account, onSave, title }) {
     }
   }, [account, open])
 
+  const matchedAgent = agentOptions.find((agent) => agent.id === formData.id)
+
   const handleSave = () => {
     if (!formData.id || !formData.bot_token) {
       toast.error('保存失败', 'ID 和 Bot Token 不能为空')
@@ -136,12 +143,25 @@ function AccountDialog({ open, onOpenChange, account, onSave, title }) {
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
-            <Label>账户 ID *</Label>
+            <Label>账户 ID（建议和智能体 ID 一致）*</Label>
             <Input
-              placeholder="例如: my_bot"
+              placeholder="例如: chief / coder / main"
+              list="telegram-agent-id-options"
               value={formData.id}
               onChange={(e) => setFormData({ ...formData, id: e.target.value })}
             />
+            <datalist id="telegram-agent-id-options">
+              {agentOptions.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </datalist>
+            {matchedAgent && (
+              <p className="text-xs text-muted-foreground">
+                当前将绑定到聊天里的智能体名称: {matchedAgent.name}
+              </p>
+            )}
           </div>
           <div className="space-y-2">
             <Label>Bot Token *</Label>
@@ -204,6 +224,8 @@ function AccountDialog({ open, onOpenChange, account, onSave, title }) {
 
 export default function TelegramChannelConfig() {
   const [config, setConfig] = useState({ enabled: false, accounts: [] })
+  const [agentOptions, setAgentOptions] = useState([])
+  const [agentNameMap, setAgentNameMap] = useState({})
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [showDialog, setShowDialog] = useState(false)
@@ -211,7 +233,42 @@ export default function TelegramChannelConfig() {
 
   useEffect(() => {
     loadConfig()
+    loadAgents()
   }, [])
+
+  const loadAgents = async () => {
+    try {
+      const result = await api.agents.list()
+      if (!result.success || !Array.isArray(result.data)) return
+
+      const map = {}
+      const options = result.data
+        .map((agent) => {
+          const id = String(agent?.id || '').trim()
+          if (!id) return null
+          const name = String(
+            agent?.identity?.name ||
+            agent?.name ||
+            agent?.display_name ||
+            id
+          ).trim() || id
+          map[id] = name
+          return { id, name }
+        })
+        .filter(Boolean)
+
+      // Telegram 历史里常见 default 账户，默认映射为 main 的显示名
+      if (!map.default && map.main) {
+        map.default = map.main
+        options.unshift({ id: 'default', name: map.main })
+      }
+
+      setAgentNameMap(map)
+      setAgentOptions(options)
+    } catch (error) {
+      console.error('加载智能体列表失败:', error)
+    }
+  }
 
   const loadConfig = async () => {
     setIsLoading(true)
@@ -291,6 +348,12 @@ export default function TelegramChannelConfig() {
     setEditingAccount(null)
   }
 
+  const getAccountDisplayName = (accountId) => {
+    const id = String(accountId || '').trim()
+    if (!id) return ''
+    return agentNameMap[id] || id
+  }
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-8">
@@ -347,6 +410,7 @@ export default function TelegramChannelConfig() {
               <TelegramAccountCard
                 key={account.id}
                 account={account}
+                displayName={getAccountDisplayName(account.id)}
                 onEdit={handleEdit}
                 onDelete={handleDeleteAccount}
                 onToggle={handleToggleAccount}
@@ -378,6 +442,7 @@ export default function TelegramChannelConfig() {
         }}
         account={editingAccount}
         onSave={handleSave}
+        agentOptions={agentOptions}
         title={editingAccount ? '编辑账户' : '添加账户'}
       />
     </div>

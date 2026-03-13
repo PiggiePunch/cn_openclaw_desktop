@@ -8,7 +8,6 @@ import Skills from './components/Skills'
 import Schedule from './components/Schedule'
 import Browser from './components/Browser'
 import MemoryCenter from './components/MemoryCenter'
-import Tools from './components/Tools'
 import ToolManager from './components/ToolManager'
 import AISettings from './components/AISettings'
 import SettingsPage from './components/SettingsPage'
@@ -82,6 +81,8 @@ function App() {
       } else {
         console.log('🌐 非 Tauri 运行环境，跳过安装/进程初始化')
       }
+      // 1.5 启动后执行一次引用修复，避免已删除智能体被 cron/通道残留反复“复活”。
+      await runStartupRepair()
       // 2. Gateway 准备就绪后，再加载其他数据
       loadConfig()
       loadSystemInfo()
@@ -192,6 +193,24 @@ function App() {
     }
   }
 
+  const runStartupRepair = async () => {
+    try {
+      const [channelsResult, sessionsResult, cronResult] = await Promise.all([
+        api.config.cleanupInvalidChannelAgentBindings(),
+        api.sessions.cleanupInvalidAgentReferences(),
+        api.cron.repairInvalidAgentBindings({ disableInvalid: true }),
+      ])
+
+      console.log('🧹 启动修复完成:', {
+        channelsRemoved: channelsResult?.data?.removed || 0,
+        sessionsRemoved: sessionsResult?.data?.removed || 0,
+        cronFixed: cronResult?.data?.fixed || 0,
+      })
+    } catch (error) {
+      console.warn('启动修复失败（忽略，不阻塞启动）:', error)
+    }
+  }
+
   // 🔥 处理智能体切换（从 WorkspaceEditor 跳转到聊天）
   const handleSwitchAgent = (agentId) => {
     setSwitchToAgent(agentId)
@@ -271,7 +290,10 @@ function App() {
       <Toaster />
 
       {/* 侧边栏 */}
-      <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
+      <Sidebar
+        currentPage={currentPage === 'tools' ? 'toolManager' : currentPage}
+        onPageChange={(page) => setCurrentPage(page === 'tools' ? 'toolManager' : page)}
+      />
 
       {/* 主内容区 - 统一用 flex-1 保证铺满剩余空间 */}
       <main className="flex-1 flex flex-col min-w-0 relative">
@@ -303,12 +325,7 @@ function App() {
             <Browser />
           </PageContainer>
         </div>
-        <div className={`absolute inset-0 overflow-auto ${currentPage === 'tools' ? '' : 'hidden'}`}>
-          <PageContainer title="工具列表" description="Agent 可调用的 26+ 工具">
-            <Tools />
-          </PageContainer>
-        </div>
-        <div className={`absolute inset-0 overflow-auto ${currentPage === 'toolManager' ? '' : 'hidden'}`}>
+        <div className={`absolute inset-0 overflow-auto ${currentPage === 'toolManager' || currentPage === 'tools' ? '' : 'hidden'}`}>
           <PageContainer title="工具管理" description="创建和管理自定义工具">
             <ToolManager />
           </PageContainer>
