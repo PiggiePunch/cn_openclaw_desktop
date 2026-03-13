@@ -18,72 +18,212 @@ import { toast } from '@/hooks/useToast'
  */
 export default function SessionMemory() {
   const [sessions, setSessions] = useState([])
+  const [agentNames, setAgentNames] = useState({})
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(null)
 
-  const parseAgentIdFromSessionKey = (sessionKey) => {
-    if (typeof sessionKey !== 'string' || !sessionKey) return 'unknown'
-    if (sessionKey === 'main' || sessionKey.startsWith('agent:main')) return 'main'
+  const stripAssistantEnvelopeTags = (content) => {
+    if (typeof content !== 'string' || !content) return content
+    return content.replace(/<\/?\s*final\b[^>]*>/gi, '')
+  }
 
-    if (sessionKey.startsWith('agent:')) {
-      const parts = sessionKey.split(':')
-      return parts[1] || 'unknown'
+  const normalizeSessionKey = (sessionKey) => {
+    if (!sessionKey) return 'main'
+    const raw = String(sessionKey).trim()
+    if (!raw) return 'main'
+    const lowered = raw.toLowerCase()
+    if (lowered === 'main' || lowered === 'agent:main' || lowered === 'agent:main:main') {
+      return 'main'
     }
+    if (raw.startsWith('agent:')) {
+      const parts = raw.split(':').filter(Boolean)
+      if (parts.length === 2) return `${raw}:main`
+    }
+    return raw
+  }
 
-    const slashParts = sessionKey.split('/')
-    return slashParts[0] || 'unknown'
+  const parseAgentIdFromSessionKey = (sessionKey) => {
+    const normalized = normalizeSessionKey(sessionKey)
+    if (typeof normalized !== 'string' || !normalized) return 'main'
+    if (normalized === 'main' || normalized.startsWith('agent:main')) return 'main'
+
+    if (normalized.startsWith('agent:')) {
+      const parts = normalized.split(':')
+      return parts[1] || 'main'
+    }
+    return 'main'
+  }
+
+  const extractTextFromMessage = (msg) => {
+    const source = msg?.content ?? msg
+    if (typeof source === 'string') return source
+    if (Array.isArray(source)) {
+      return source
+        .map((block) => (block?.type === 'text' ? block.text : ''))
+        .filter(Boolean)
+        .join('\n')
+    }
+    if (typeof source?.text === 'string') return source.text
+    return ''
+  }
+
+  const normalizePreviewText = (msg) => {
+    const text = extractTextFromMessage(msg)
+    if (msg?.role === 'assistant') {
+      return stripAssistantEnvelopeTags(text)
+    }
+    return text
+  }
+
+  const getAgentDisplayName = (agentId) => {
+    if (agentId === 'main') {
+      return agentNames.main || '默认助手'
+    }
+    return agentNames[agentId] || `智能体-${agentId}`
   }
 
   const normalizeSessionItem = (item, index) => {
     if (typeof item === 'string') {
+      const sessionKey = normalizeSessionKey(item)
+      const agentId = parseAgentIdFromSessionKey(sessionKey)
       return {
-        id: item || `session-${index}`,
-        agent_id: parseAgentIdFromSessionKey(item),
-        preview: item,
+        id: sessionKey || `session-${index}`,
+        session_key: sessionKey,
+        sessionKey,
+        agent_id: agentId,
+        title: sessionKey === 'main' ? '默认会话' : sessionKey,
+        preview: '',
+        created_at: null,
+        updated_at: null,
+        message_count: 0,
       }
     }
 
     if (!item || typeof item !== 'object') return null
 
-    const sessionKey =
+    const sessionKey = normalizeSessionKey(
       item.session_key ||
       item.sessionKey ||
       item.key ||
       item.id ||
-      ''
+      '',
+    )
 
-    const id = sessionKey || item.id || `session-${index}`
+    const id = sessionKey || normalizeSessionKey(item.id) || `session-${index}`
     const agentId = item.agent_id || item.agentId || parseAgentIdFromSessionKey(sessionKey)
+    const countRaw = item.message_count ?? item.messageCount ?? item.count ?? item.total_messages ?? 0
+    const count = Number.isFinite(Number(countRaw)) ? Number(countRaw) : 0
 
     return {
       ...item,
       id,
+      session_key: sessionKey,
+      sessionKey,
       agent_id: agentId,
-      preview: item.preview || sessionKey || item.title || '',
+      title: item.title || item.name || item.label || (sessionKey === 'main' ? '默认会话' : sessionKey),
+      preview: item.preview || '',
       created_at: item.created_at || item.createdAt || null,
       updated_at: item.updated_at || item.updatedAt || null,
-      message_count: item.message_count || item.messageCount || 0,
+      message_count: count,
     }
   }
 
   // 加载会话列表
   const loadSessions = async () => {
     setLoading(true)
-    // 使用 api.sessions.list() - 不传 agentId 则获取所有会话
-    const result = await api.sessions.list()
-    if (result.success) {
-      const rawSessions = Array.isArray(result.data)
-        ? result.data
-        : (result.data?.sessionKeys || result.data?.sessions || [])
+    try {
+      const [sessionsResult, agentsResult] = await Promise.all([
+        api.sessions.list(),
+        api.agents.list(),
+      ])
+
+      if (agentsResult.success && Array.isArray(agentsResult.data)) {
+        const names = {}
+        for (const agent of agentsResult.data) {
+          const id = String(agent?.id || '').trim()
+          if (!id) continue
+          const name = agent?.identity?.name || agent?.name || agent?.display_name || id
+          names[id] = name
+        }
+        setAgentNames(names)
+      }
+
+      if (!sessionsResult.success) {
+        console.error('加载会话列表失败:', sessionsResult.error)
+        setSessions([])
+        return
+      }
+
+      const rawSessions = Array.isArray(sessionsResult.data)
+        ? sessionsResult.data
+        : (sessionsResult.data?.sessionKeys || sessionsResult.data?.sessions || [])
       const normalized = Array.isArray(rawSessions)
         ? rawSessions.map((item, index) => normalizeSessionItem(item, index)).filter(Boolean)
         : []
-      setSessions(normalized)
-    } else {
-      console.error('加载会话列表失败:', result.error)
+
+      const dedupMap = new Map()
+      for (const session of normalized) {
+        const key = session.session_key || session.id
+        if (!key) continue
+        if (!dedupMap.has(key) || key.endsWith(':main')) {
+          dedupMap.set(key, session)
+        }
+      }
+
+      const dedupedSessions = Array.from(dedupMap.values())
+      const enrichedSessions = await Promise.all(
+        dedupedSessions.map(async (session) => {
+          const sessionKey = normalizeSessionKey(session.session_key || session.id)
+          let preview = session.preview
+          let messageCount = Number(session.message_count || 0)
+          let latestTimestamp = session.updated_at || session.created_at || null
+
+          if (!preview || messageCount === 0 || !latestTimestamp) {
+            try {
+              const historyResult = await api.sessions.getMessages(sessionKey)
+              if (historyResult.success && Array.isArray(historyResult.data)) {
+                const history = historyResult.data
+                messageCount = history.length
+                if (history.length > 0) {
+                  const last = history[history.length - 1]
+                  preview = normalizePreviewText(last) || preview
+                  latestTimestamp =
+                    last?.timestamp ||
+                    last?.created_at ||
+                    last?.createdAt ||
+                    latestTimestamp
+                }
+              }
+            } catch (error) {
+              // ignore
+            }
+          }
+
+          return {
+            ...session,
+            id: sessionKey,
+            session_key: sessionKey,
+            sessionKey,
+            message_count: Number.isFinite(Number(messageCount)) ? Number(messageCount) : 0,
+            preview: preview || '',
+            updated_at: latestTimestamp || session.updated_at || null,
+          }
+        }),
+      )
+
+      enrichedSessions.sort((a, b) => {
+        const ta = new Date(a.updated_at || a.created_at || 0).getTime() || 0
+        const tb = new Date(b.updated_at || b.created_at || 0).getTime() || 0
+        return tb - ta
+      })
+
+      setSessions(enrichedSessions)
+    } catch (error) {
+      console.error('加载会话列表失败:', error)
       setSessions([])
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   // 删除会话
@@ -150,10 +290,10 @@ export default function SessionMemory() {
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2">
                   <MessageSquare className="w-4 h-4" />
-                  {session.agent_id || '未知 Agent'}
+                  {getAgentDisplayName(session.agent_id || 'main')}
                 </CardTitle>
                 <div className="flex items-center gap-2">
-                  {session.message_count && (
+                  {Number(session.message_count) > 0 && (
                     <Badge variant="outline" className="text-xs">
                       {session.message_count} 条消息
                     </Badge>
@@ -161,10 +301,10 @@ export default function SessionMemory() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => handleDelete(session.id)}
-                    disabled={deleting === session.id}
+                    onClick={() => handleDelete(session.session_key || session.id)}
+                    disabled={deleting === (session.session_key || session.id)}
                   >
-                    {deleting === session.id ? (
+                    {deleting === (session.session_key || session.id) ? (
                       <Loader2 className="w-3 h-3 animate-spin" />
                     ) : (
                       <Trash2 className="w-3 h-3" />
@@ -190,6 +330,9 @@ export default function SessionMemory() {
                   {session.preview}
                 </p>
               )}
+              <p className="text-xs text-muted-foreground/70 mt-2 font-mono">
+                {session.session_key}
+              </p>
             </CardContent>
           </Card>
         ))}

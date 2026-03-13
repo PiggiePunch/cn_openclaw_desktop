@@ -2,6 +2,8 @@
  * MessageGroup - 消息分组组件
  * 实现微信风格的消息组显示
  */
+import { useCallback, useState } from 'react'
+import { Check, Copy, ChevronDown, ChevronRight, Wrench } from 'lucide-react'
 import { MessageAvatar } from './MessageAvatar'
 import { MessageContent } from './MessageContent'
 import { extractThinking } from './ThinkingBlock'
@@ -18,10 +20,61 @@ function formatTokens(count) {
   return String(count)
 }
 
+function extractSystemText(content) {
+  if (typeof content === 'string') {
+    return content.trim()
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (!item || typeof item !== 'object') return ''
+        if (typeof item.text === 'string') return item.text
+        if (typeof item.content === 'string') return item.content
+        if (typeof item.message === 'string') return item.message
+        if (typeof item.summary === 'string') return item.summary
+        if (typeof item.error === 'string') return item.error
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim()
+  }
+
+  if (content && typeof content === 'object') {
+    if (typeof content.text === 'string') return content.text.trim()
+    if (typeof content.content === 'string') return content.content.trim()
+    if (typeof content.message === 'string') return content.message.trim()
+    if (typeof content.summary === 'string') return content.summary.trim()
+    if (typeof content.error === 'string') return content.error.trim()
+    return ''
+  }
+
+  return ''
+}
+
+function isUsefulSystemText(text) {
+  const normalized = String(text || '').trim()
+  if (!normalized) return false
+  if (['{}', '[]', 'null', 'undefined'].includes(normalized)) return false
+  if (normalized === '**正在调用工具...**' || normalized === '*工具执行中...*') return false
+  return true
+}
+
+function isRenderableMessage(message) {
+  if (!message) return false
+  const { thinking, mainContent } = extractThinking(message.content)
+  const contentToDisplay = thinking ? mainContent : message.content
+  const hasContent = typeof contentToDisplay === 'string' && contentToDisplay.trim().length > 0
+  const hasToolCalls = extractToolCalls(message).length > 0
+  return hasContent || hasToolCalls
+}
+
 /**
  * 单条消息气泡
  */
 function MessageBubble({ message, isStreaming, showTime }) {
+  const [copied, setCopied] = useState(false)
   const { thinking, mainContent } = extractThinking(message.content)
   const toolCalls = extractToolCalls(message)
 
@@ -44,11 +97,36 @@ function MessageBubble({ message, isStreaming, showTime }) {
 
   // 🔥 是否为主动消息（智能体主动发起）
   const isProactive = message.is_proactive
+  const copyText = typeof contentToDisplay === 'string' ? contentToDisplay.trim() : ''
+  const canCopy = !isStreaming && copyText.length > 0
+
+  const handleCopy = useCallback(async () => {
+    if (!canCopy) return
+    try {
+      await navigator.clipboard.writeText(copyText)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch (error) {
+      console.error('复制消息失败:', error)
+    }
+  }, [canCopy, copyText])
 
   return (
-    <div className={`message-bubble ${isStreaming ? 'streaming' : ''} ${isProactive ? 'proactive' : ''}`}>
+    <div className={`message-bubble group ${isStreaming ? 'streaming' : ''} ${isProactive ? 'proactive' : ''}`}>
       {/* 思考过程 - 不显示，直接隐藏 */}
       {/* {thinking && <ThinkingBlock content={thinking} />} */}
+
+      {canCopy && (
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="message-bubble__copy"
+          title={copied ? '已复制' : '复制消息'}
+          aria-label={copied ? '已复制' : '复制消息'}
+        >
+          {copied ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+        </button>
+      )}
 
       {/* 主动消息标签 */}
       {isProactive && (
@@ -105,8 +183,10 @@ export function MessageGroup({
   isStreaming = false,
   streamingContent = ''
 }) {
+  const [systemExpanded, setSystemExpanded] = useState(false)
   const displayName = getGroupDisplayName(group, agentName)
   const showTime = formatGroupTime(group.lastTime)
+  const isSystemGroup = group.role !== 'user' && group.role !== 'assistant'
 
   // 🔥 优化流式输出逻辑：
   // 1. 如果有 streamingContent，显示流式内容（替代最后一条 assistant 消息）
@@ -119,6 +199,93 @@ export function MessageGroup({
   const messagesToShow = hasStreamingContent && group.role === 'assistant'
     ? group.messages.slice(0, -1)  // 排除最后一条
     : group.messages
+  const renderableMessages = messagesToShow.filter(isRenderableMessage)
+
+  if (isSystemGroup) {
+    const systemEntries = group.messages
+      .map((message, idx) => {
+        const text = extractSystemText(message?.content)
+        return {
+          id: idx,
+          text,
+          usage: message?.usage,
+          timestamp: message?.timestamp,
+        }
+      })
+      .filter((entry) => isUsefulSystemText(entry.text))
+
+    if (systemEntries.length === 0) {
+      return null
+    }
+
+    return (
+      <div className={`message-group message-group--${group.role}`}>
+        <div className="message-group__avatar">
+          <MessageAvatar
+            role={group.role}
+            name={displayName}
+          />
+        </div>
+
+        <div className="message-group__content">
+          <div className="message-group__header">
+            <span className="message-group__name">{displayName}</span>
+          </div>
+
+          <div className="message-group__bubbles">
+            <button
+              type="button"
+              onClick={() => setSystemExpanded(prev => !prev)}
+              className="tool-card tool-card--clickable w-full text-left"
+            >
+              <div className="tool-card__header">
+                <div className="tool-card__title">
+                  {systemExpanded ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
+                  )}
+                  <Wrench className="w-3.5 h-3.5 tool-card__icon" />
+                  <span>{`系统操作 ${systemEntries.length} 条`}</span>
+                </div>
+                <span className="text-xs text-muted-foreground">
+                  {systemExpanded ? '收起' : '已折叠'}
+                </span>
+              </div>
+            </button>
+
+            {systemExpanded && (
+              <div className="tool-cards-container mt-2">
+                {systemEntries.length === 0 ? (
+                  <div className="tool-card">
+                    <div className="text-xs text-muted-foreground">无可展示内容</div>
+                  </div>
+                ) : (
+                  systemEntries.map((entry) => (
+                    <div key={entry.id} className="tool-card">
+                      <div className="tool-card__header">
+                        <span className="text-xs text-muted-foreground">
+                          {entry.timestamp ? formatGroupTime(entry.timestamp) : showTime || '系统消息'}
+                        </span>
+                        {entry.usage?.total_tokens > 0 && (
+                          <span className="text-xs text-muted-foreground">
+                            {formatTokens(entry.usage.total_tokens)} tokens
+                          </span>
+                        )}
+                      </div>
+                      <div className="tool-card__detail">
+                        <code>{entry.text}</code>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   // 🔥 如果是过渡期且组内没有消息，只显示加载状态
   if (isInTransition && group.messages.length === 0) {
@@ -147,6 +314,10 @@ export function MessageGroup({
     )
   }
 
+  if (renderableMessages.length === 0 && !hasStreamingContent && !isInTransition) {
+    return null
+  }
+
   return (
     <div className={`message-group message-group--${group.role}`}>
       {/* 头像 - 顶部对齐 */}
@@ -167,11 +338,11 @@ export function MessageGroup({
         {/* 消息气泡区 */}
         <div className="message-group__bubbles">
           {/* 组内消息（流式输出时排除最后一条） */}
-          {messagesToShow.map((message, idx) => (
+          {renderableMessages.map((message, idx) => (
             <MessageBubble
               key={idx}
               message={message}
-              showTime={idx === messagesToShow.length - 1 ? showTime : null}
+              showTime={idx === renderableMessages.length - 1 ? showTime : null}
             />
           ))}
 

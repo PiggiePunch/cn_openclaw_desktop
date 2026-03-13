@@ -30,6 +30,35 @@ import api from '@/lib/api'
 import { getGateway } from '@/lib/gateway'
 import { toast } from '@/hooks/useToast'
 
+const CHAT_MODEL_DEBUG_STORAGE_KEY = 'openclaw_chat_model_debug'
+
+function isChatModelDebugEnabled() {
+  if (typeof window === 'undefined') return false
+  try {
+    const raw = window.localStorage.getItem(CHAT_MODEL_DEBUG_STORAGE_KEY)
+    if (raw == null) return true
+    const normalized = String(raw).trim().toLowerCase()
+    return !['0', 'false', 'off', 'no'].includes(normalized)
+  } catch {
+    return true
+  }
+}
+
+function toDebugTextPreview(value, maxLen = 180) {
+  if (typeof value !== 'string') return ''
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLen) return normalized
+  return `${normalized.slice(0, maxLen)}...`
+}
+
+function logChatModelDebug(event, payload = {}) {
+  if (!isChatModelDebugEnabled()) return
+  console.log(`[ChatDebug] ${event}`, {
+    at: new Date().toISOString(),
+    ...payload,
+  })
+}
+
 // 从session_key获取显示名称
 function getSessionDisplayName(sessionKey) {
   if (!sessionKey) return '未选择会话'
@@ -77,6 +106,28 @@ function parseAgentIdFromSessionKey(sessionKey) {
   return sessionKey.split(':')[1] || 'main'
 }
 
+function extractSessionMessageCount(session) {
+  const candidates = [
+    session?.message_count,
+    session?.messageCount,
+    session?.count,
+    session?.total_messages,
+    session?.totalMessages,
+    session?.stats?.message_count,
+    session?.stats?.messageCount,
+    session?.meta?.message_count,
+    session?.meta?.messageCount,
+    session?.meta?.count,
+  ]
+  for (const value of candidates) {
+    const num = Number(value)
+    if (Number.isFinite(num) && num >= 0) {
+      return num
+    }
+  }
+  return 0
+}
+
 function extractTextFromGatewayMessage(messageLike) {
   if (!messageLike) return ''
   const source = typeof messageLike === 'object' && messageLike !== null
@@ -89,7 +140,6 @@ function extractTextFromGatewayMessage(messageLike) {
       .map((block) => {
         if (!block || typeof block !== 'object') return ''
         if (block.type === 'text' && typeof block.text === 'string') return block.text
-        if (block.type === 'thinking' && typeof block.thinking === 'string') return block.thinking
         return ''
       })
       .filter(Boolean)
@@ -98,6 +148,62 @@ function extractTextFromGatewayMessage(messageLike) {
 
   if (typeof source?.text === 'string') return source.text
   return ''
+}
+
+function hasToolLikeBlocks(content) {
+  if (!Array.isArray(content)) return false
+  return content.some((item) => {
+    if (!item || typeof item !== 'object') return false
+    const type = String(item.type || '').toLowerCase()
+    if (['toolcall', 'tool_call', 'tooluse', 'tool_use', 'toolresult', 'tool_result'].includes(type)) {
+      return true
+    }
+    return Boolean(item.name && (item.arguments || item.args || item.content || item.text))
+  })
+}
+
+function isSystemLikeRole(role) {
+  return role !== 'user' && role !== 'assistant'
+}
+
+function messageHasDisplayContent(message) {
+  if (!message || typeof message !== 'object') return false
+  const text = typeof message.content === 'string' ? message.content.trim() : ''
+  const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+  return text.length > 0 || hasToolCalls
+}
+
+function groupHasDisplayContent(group) {
+  if (!group || !Array.isArray(group.messages) || group.messages.length === 0) return false
+  return group.messages.some(messageHasDisplayContent)
+}
+
+function mergeAdjacentSystemGroups(groups) {
+  if (!Array.isArray(groups) || groups.length === 0) return []
+  const merged = []
+
+  for (const group of groups) {
+    if (!group || !Array.isArray(group.messages)) continue
+    const safeGroup = {
+      ...group,
+      messages: [...group.messages],
+    }
+    const last = merged[merged.length - 1]
+    if (last && isSystemLikeRole(last.role) && isSystemLikeRole(safeGroup.role)) {
+      last.messages = [...last.messages, ...safeGroup.messages]
+      last.lastTime = safeGroup.lastTime ?? last.lastTime
+      continue
+    }
+    merged.push(safeGroup)
+  }
+
+  return merged
+}
+
+function stripAssistantEnvelopeTags(content) {
+  if (typeof content !== 'string' || !content) return content
+  // 部分模型会返回结构化包裹标签（如 <final>...</final>），展示层直接去掉外壳。
+  return content.replace(/<\/?\s*final\b[^>]*>/gi, '')
 }
 
 // 格式化消息时间
@@ -195,6 +301,17 @@ function pickProviderSelection(providerConfigMap, preferredProvider = '', prefer
   }
 }
 
+function loadAgentModelConfigFromStorage() {
+  try {
+    const raw = localStorage.getItem('agent_model_config')
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export default function Chat({ switchToAgent }) {
   // 消息状态
   const [messages, setMessages] = useState([])
@@ -224,7 +341,7 @@ export default function Chat({ switchToAgent }) {
   const [currentSessionKey, setCurrentSessionKey] = useState(() => {
     try {
       const stored = localStorage.getItem('openclaw_current_session')
-      return stored || 'main'
+      return normalizeSessionKey(stored || 'main')
     } catch (e) {
       return 'main'
     }
@@ -307,6 +424,9 @@ export default function Chat({ switchToAgent }) {
 
   // 🔥 记录当前会话是否获得焦点（已读）
   const [focusedSession, setFocusedSession] = useState(currentSessionKey)
+  // 当前运行中的会话（用于隔离不同智能体的运行状态展示）
+  const [runtimeSessionKey, setRuntimeSessionKey] = useState(null)
+  const runtimeSessionKeyRef = useRef(null)
 
   const messagesEndRef = useRef(null)
   const scrollAreaRef = useRef(null)  // ScrollArea 引用
@@ -328,6 +448,16 @@ export default function Chat({ switchToAgent }) {
     }, 0)
   }, [])
 
+  const pickSelectionForSession = (providerConfigMap, sessionKey, fallbackProvider = '', fallbackModel = '') => {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey)
+    const storedMeta = loadAgentModelConfigFromStorage()?.[normalizedSessionKey] || {}
+    return pickProviderSelection(
+      providerConfigMap,
+      storedMeta?.provider || fallbackProvider || '',
+      storedMeta?.model || fallbackModel || '',
+    )
+  }
+
   // 加载配置
   useEffect(() => {
     const loadConfig = async () => {
@@ -337,8 +467,19 @@ export default function Chat({ switchToAgent }) {
         const cfg = result.data
         setConfig(cfg)
 
-        const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+        const selected = pickSelectionForSession(
+          cfg?.ai_provider,
+          currentSessionKeyRef.current || currentSessionKey || 'main',
+          currentProvider,
+          currentModel,
+        )
         if (selected.provider) {
+          debugModelFlow('config.load.selection', {
+            source: 'loadConfig',
+            selectedProvider: selected.provider,
+            selectedModel: selected.model,
+            configuredProviders: getConfiguredProviderEntries(cfg?.ai_provider).map((item) => item.id),
+          })
           setCurrentProvider(selected.provider)
           setCurrentModel(selected.model)
         }
@@ -356,27 +497,69 @@ export default function Chat({ switchToAgent }) {
       if (!result.success) return
       const cfg = result.data
       setConfig(cfg)
-      const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+      const selected = pickSelectionForSession(
+        cfg?.ai_provider,
+        currentSessionKeyRef.current || currentSessionKey || 'main',
+        currentProvider,
+        currentModel,
+      )
       if (selected.provider) {
+        debugModelFlow('config.update.selection', {
+          source: 'openclaw:config-updated',
+          selectedProvider: selected.provider,
+          selectedModel: selected.model,
+          configuredProviders: getConfiguredProviderEntries(cfg?.ai_provider).map((item) => item.id),
+        })
         setCurrentProvider(selected.provider)
         setCurrentModel(selected.model)
       }
     }
     window.addEventListener('openclaw:config-updated', handleConfigUpdated)
     return () => window.removeEventListener('openclaw:config-updated', handleConfigUpdated)
-  }, [currentModel, currentProvider])
+  }, [])
 
   // 🔥 用于事件处理的 ref（避免闭包问题）
   const lastUsageRef = useRef(null)
   const isLoadingHistoryRef = useRef(false)
   const currentSessionKeyRef = useRef(currentSessionKey)
+  const currentProviderRef = useRef(currentProvider)
+  const currentModelRef = useRef(currentModel)
   const historyLoadTimeoutRef = useRef(null) // 🔥 用于 setTimeout cleanup
   const runTextCacheRef = useRef(new Map())
+  const sessionMessageCountCacheRef = useRef(new Map())
+  const lifecycleErrorHandledRunsRef = useRef(new Set())
+  const debugSequenceRef = useRef(0)
+  const runChunkCountRef = useRef(new Map())
+
+  const debugModelFlow = useCallback((event, payload = {}) => {
+    const seq = (debugSequenceRef.current || 0) + 1
+    debugSequenceRef.current = seq
+    logChatModelDebug(event, {
+      seq,
+      sessionKey: normalizeSessionKey(currentSessionKeyRef.current || 'main'),
+      runtimeSessionKey: normalizeSessionKey(runtimeSessionKeyRef.current || 'main'),
+      uiProvider: currentProviderRef.current || '',
+      uiModel: currentModelRef.current || '',
+      ...payload,
+    })
+  }, [])
 
   // 保持 ref 同步
   useEffect(() => {
     currentSessionKeyRef.current = currentSessionKey
   }, [currentSessionKey])
+
+  useEffect(() => {
+    currentProviderRef.current = currentProvider
+  }, [currentProvider])
+
+  useEffect(() => {
+    currentModelRef.current = currentModel
+  }, [currentModel])
+
+  useEffect(() => {
+    runtimeSessionKeyRef.current = runtimeSessionKey
+  }, [runtimeSessionKey])
 
   // 🔥 同步 unreadCounts 到 ref
   useEffect(() => {
@@ -438,20 +621,19 @@ export default function Chat({ switchToAgent }) {
       if (tool_calls && tool_calls.length > 0) {
         // 🔥 工具调用时更新状态
         setAgentStatus('using_tool')
-        // 工具调用信息
-        const toolCallContent = formatToolCallsStatic(tool_calls)
-        setStreamingContent(prev => prev + toolCallContent)
       } else if (content) {
+        const sanitizedContent = stripAssistantEnvelopeTags(content)
+        if (!sanitizedContent) {
+          return
+        }
         // 🔥 收到普通内容时更新状态为回复中
         setAgentStatus('responding')
         // 普通文本内容
-        setStreamingContent(prev => prev + content)
+        setStreamingContent(prev => prev + sanitizedContent)
       }
 
       if (is_last) {
-        // 🔥 优化：流式结束后，先清空流式内容，保持 isStreaming 状态
-        // 等历史加载完成后再重置 isStreaming，避免过渡期显示异常
-        setStreamingContent('')
+        // 流式结束后保留当前内容，等历史加载完成再清空，避免“看不到流式过程”
         setAgentStatus('') // 🔥 清空状态
 
         // 🔥 清理之前的 timeout（防止重复）
@@ -465,8 +647,14 @@ export default function Chat({ switchToAgent }) {
           isLoadingHistoryRef.current = true
 
           try {
+            const targetSessionKey = normalizeSessionKey(
+              runtimeSessionKeyRef.current || currentSessionKeyRef.current || 'main',
+            )
+            const shouldApplyToUi =
+              targetSessionKey === normalizeSessionKey(currentSessionKeyRef.current || 'main')
+
             // 刷新会话历史（从后端加载最新消息）
-            await loadSessionHistory(currentSessionKeyRef.current)
+            await loadSessionHistory(targetSessionKey, { applyToUi: shouldApplyToUi })
 
             // 🔥 检查是否有待处理的消息队列
             const hasQueuedMessages = messageQueueRef.current.length > 0
@@ -479,8 +667,10 @@ export default function Chat({ switchToAgent }) {
               }
             } else {
               // 历史加载完成后，才重置流式状态
+              setStreamingContent('')
               setIsStreaming(false)
               setIsLoading(false)
+              setRuntimeSessionKey(null)
             }
 
             // 重置 usage
@@ -507,8 +697,10 @@ export default function Chat({ switchToAgent }) {
           } catch (err) {
             console.error('[handleChatChunk] 加载历史失败:', err)
             // 即使失败也要重置状态，防止 UI 卡住
+            setStreamingContent('')
             setIsStreaming(false)
             setIsLoading(false)
+            setRuntimeSessionKey(null)
           } finally {
             isLoadingHistoryRef.current = false
             historyLoadTimeoutRef.current = null
@@ -521,6 +713,7 @@ export default function Chat({ switchToAgent }) {
       setIsStreaming(false)
       setIsLoading(false)
       setAgentStatus('')
+      setRuntimeSessionKey(null)
     }
   }, [])
 
@@ -528,11 +721,46 @@ export default function Chat({ switchToAgent }) {
   const handleProactiveMessage = useCallback((event) => {
     try {
       const payload = event?.payload || event || {}
+      const stream = typeof payload?.stream === 'string' ? payload.stream.toLowerCase() : ''
+      const lifecyclePhase = typeof payload?.data?.phase === 'string' ? payload.data.phase.toLowerCase() : ''
+      const runId = typeof payload?.runId === 'string' ? payload.runId : ''
+      const lifecycleError = payload?.data?.error || payload?.errorMessage || payload?.error
+      const lifecycleSessionKey = normalizeSessionKey(payload.sessionKey || payload.session_key || 'main')
+      const activeSessionKey = normalizeSessionKey(currentSessionKeyRef.current || 'main')
+      const runningSessionKey = normalizeSessionKey(runtimeSessionKeyRef.current || activeSessionKey)
+
+      // 某些 Gateway 版本错误只出现在 agent lifecycle，不一定有 chat error 事件。
+      // 这里兜底把错误直接落在当前会话，避免“卡在思考中且无回复”。
+      if (stream === 'lifecycle' && lifecyclePhase === 'error' && typeof lifecycleError === 'string' && lifecycleError.trim()) {
+        const isCurrentRun = lifecycleSessionKey === activeSessionKey || lifecycleSessionKey === runningSessionKey
+        debugModelFlow('chat.lifecycle.error', {
+          stream,
+          phase: lifecyclePhase,
+          runId,
+          lifecycleSessionKey,
+          isCurrentRun,
+          errorPreview: toDebugTextPreview(lifecycleError),
+        })
+        if (isCurrentRun) {
+          if (runId) lifecycleErrorHandledRunsRef.current.add(runId)
+          handleChatChunk({
+            payload: {
+              content: `\n${lifecycleError.trim()}`,
+              is_last: true,
+              usage: null,
+            },
+          })
+        }
+        return
+      }
+
       const message = payload.message || payload.text || payload.content
       const timestamp = payload.timestamp
       const session_key = payload.session_key || payload.sessionKey
       if (!message || typeof message !== 'string') return
-      console.log('🤖 收到智能体主动消息:', message, timestamp, session_key)
+      const cleanedMessage = message.trim()
+      if (!cleanedMessage) return
+      console.log('🤖 收到智能体主动消息:', cleanedMessage, timestamp, session_key)
 
       // 如果消息属于当前会话，直接添加到消息列表
       const targetSession = session_key || 'main'
@@ -543,7 +771,7 @@ export default function Chat({ switchToAgent }) {
         // 添加主动消息到当前会话（标记为 assistant 角色并添加特殊标记）
         const proactiveMessage = {
           role: 'assistant',
-          content: `💭 *智能体主动提醒*\n\n${message}`,
+          content: `💭 *智能体主动提醒*\n\n${cleanedMessage}`,
           timestamp: timestamp || Date.now(),
           is_proactive: true // 特殊标记，用于样式区分
         }
@@ -560,7 +788,7 @@ export default function Chat({ switchToAgent }) {
     } catch (err) {
       console.error('[handleProactiveMessage] 处理主动消息失败:', err)
     }
-  }, [])
+  }, [debugModelFlow, handleChatChunk])
 
   // 监听 Gateway chat 事件（原版协议：chat.send 返回 ack，增量通过 chat event 推送）
   useEffect(() => {
@@ -571,16 +799,26 @@ export default function Chat({ switchToAgent }) {
 
       const eventSessionKey = normalizeSessionKey(payload.sessionKey || payload.session_key || 'main')
       const activeSessionKey = normalizeSessionKey(currentSessionKeyRef.current || 'main')
+      const runningSessionKey = normalizeSessionKey(runtimeSessionKeyRef.current || activeSessionKey)
 
       // 非当前会话：仅在结束态增加未读
       const stateRaw = typeof payload.state === 'string'
         ? payload.state.toLowerCase()
         : (typeof payload.phase === 'string' ? payload.phase.toLowerCase() : '')
-      const isDone = payload.done === true || payload.is_last === true
+      const isDone = payload.done === true || payload.is_last === true || payload.isLast === true
       const hasError = Boolean(payload.error || payload.errorMessage)
-      const resolvedState = stateRaw || (hasError ? 'error' : (isDone ? 'final' : 'delta'))
+      const finalStates = new Set(['final', 'done', 'success', 'complete', 'completed', 'finished'])
+      const errorStates = new Set(['error', 'failed', 'aborted', 'cancelled', 'canceled'])
+      const resolvedState = (() => {
+        if (hasError || errorStates.has(stateRaw)) return 'error'
+        if (isDone || finalStates.has(stateRaw)) return 'final'
+        return 'delta'
+      })()
 
-      if (eventSessionKey !== activeSessionKey) {
+      const isActiveSessionEvent = eventSessionKey === activeSessionKey
+      const isRunningSessionEvent = eventSessionKey === runningSessionKey
+
+      if (!isActiveSessionEvent && !isRunningSessionEvent) {
         if (resolvedState === 'final' || resolvedState === 'error' || resolvedState === 'aborted') {
           setUnreadCounts((prev) => ({
             ...prev,
@@ -588,6 +826,13 @@ export default function Chat({ switchToAgent }) {
           }))
         }
         return
+      }
+
+      if (!isActiveSessionEvent && (resolvedState === 'final' || resolvedState === 'error' || resolvedState === 'aborted')) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [eventSessionKey]: (prev[eventSessionKey] || 0) + 1,
+        }))
       }
 
       const runId = typeof payload.runId === 'string' ? payload.runId : ''
@@ -598,12 +843,28 @@ export default function Chat({ switchToAgent }) {
       if (runId) {
         if (resolvedState === 'delta') {
           runTextCacheRef.current.set(runId, fullText || prevText)
+          const chunkCount = (runChunkCountRef.current.get(runId) || 0) + 1
+          runChunkCountRef.current.set(runId, chunkCount)
+          if ((nextChunk && chunkCount <= 3) || chunkCount % 20 === 0) {
+            debugModelFlow('chat.receive.delta', {
+              runId,
+              state: resolvedState,
+              chunkCount,
+              chunkLen: (nextChunk || '').length,
+              chunkPreview: toDebugTextPreview(nextChunk || ''),
+              eventSessionKey,
+            })
+          }
         } else if (resolvedState === 'final' || resolvedState === 'error' || resolvedState === 'aborted') {
           runTextCacheRef.current.delete(runId)
+          runChunkCountRef.current.delete(runId)
         }
       }
 
       if (resolvedState === 'delta') {
+        if (!useStreaming) {
+          return
+        }
         handleChatChunk({
           payload: {
             content: nextChunk || '',
@@ -615,6 +876,13 @@ export default function Chat({ switchToAgent }) {
       }
 
       if (resolvedState === 'final') {
+        debugModelFlow('chat.receive.final', {
+          runId,
+          state: resolvedState,
+          finalLen: (nextChunk || '').length,
+          finalPreview: toDebugTextPreview(nextChunk || ''),
+          eventSessionKey,
+        })
         handleChatChunk({
           payload: {
             content: nextChunk || '',
@@ -626,7 +894,18 @@ export default function Chat({ switchToAgent }) {
       }
 
       if (resolvedState === 'error' || resolvedState === 'aborted') {
+        if (runId && lifecycleErrorHandledRunsRef.current.has(runId)) {
+          lifecycleErrorHandledRunsRef.current.delete(runId)
+          return
+        }
         const errorText = payload.errorMessage ? `\n${payload.errorMessage}` : ''
+        debugModelFlow('chat.receive.error', {
+          runId,
+          state: resolvedState,
+          eventSessionKey,
+          errorPreview: toDebugTextPreview(errorText),
+          hasPayloadError: Boolean(payload.error || payload.errorMessage),
+        })
         handleChatChunk({
           payload: {
             content: errorText,
@@ -635,17 +914,6 @@ export default function Chat({ switchToAgent }) {
           },
         })
         return
-      }
-
-      // 未知状态兜底：只要有内容就当作一次最终消息，避免“收到事件但界面无回复”
-      if (nextChunk) {
-        handleChatChunk({
-          payload: {
-            content: nextChunk,
-            is_last: true,
-            usage: payload.usage || null,
-          },
-        })
       }
     }
 
@@ -656,7 +924,7 @@ export default function Chat({ switchToAgent }) {
       gateway.off('chat', handleGatewayChatEvent)
       gateway.off('agent', handleProactiveMessage)
     }
-  }, [handleChatChunk, handleProactiveMessage])
+  }, [handleChatChunk, handleProactiveMessage, useStreaming])
 
   // 🔥 监听会话更新事件（来自 SessionMemory 的删除操作）
   useEffect(() => {
@@ -735,30 +1003,6 @@ export default function Chat({ switchToAgent }) {
     }
   }, [])
 
-  // 静态版本的格式化工具调用（在 useEffect 中使用）
-  const formatToolCallsStatic = (toolCalls) => {
-    let content = '**正在调用工具...**\n\n'
-    for (const toolCall of toolCalls) {
-      // 🔧 兼容两种格式：
-      // 1. ToolCall 格式：{ name, arguments }
-      // 2. ToolCallDelta 格式（流式）：{ function: { name, arguments } }
-      const name = toolCall.name || toolCall.function?.name || 'unknown'
-      const rawArgs = toolCall.arguments || toolCall.function?.arguments || '{}'
-
-      content += `**工具**: \`${name}\`\n\n`
-      try {
-        const args = typeof rawArgs === 'string'
-          ? JSON.parse(rawArgs)
-          : rawArgs
-        content += `**参数**:\n\`\`\`json\n${JSON.stringify(args, null, 2)}\n\`\`\`\n\n`
-      } catch {
-        content += `**参数**: ${rawArgs}\n\n`
-      }
-    }
-    content += '*工具执行中...*\n\n'
-    return content
-  }
-
   // 加载 Gateway 会话列表
   const loadGatewaySessions = async () => {
     try {
@@ -774,6 +1018,13 @@ export default function Chat({ switchToAgent }) {
       const agents = agentsResult.success && Array.isArray(agentsResult.data)
         ? agentsResult.data
         : []
+      const knownAgentIds = new Set(
+        agents
+          .map((agent) => String(agent?.id || '').trim())
+          .filter(Boolean),
+      )
+      knownAgentIds.add('main')
+      const shouldFilterUnknownAgents = agentsResult.success
 
       if (!sessionsResult.success) {
         console.error('加载 Gateway 会话失败:', sessionsResult.error)
@@ -783,24 +1034,54 @@ export default function Chat({ switchToAgent }) {
       }
 
       const agentMap = new Map()
+      const messageCountByAgent = new Map()
+      const missingCountSessions = []
 
       console.log('📋 原始会话列表:', sessions)
 
       for (const session of sessions) {
-        const sessionKey = typeof session?.session_key === 'string' ? session.session_key : ''
+        const sessionKey = normalizeSessionKey(
+          typeof session?.session_key === 'string'
+            ? session.session_key
+            : session?.sessionKey,
+        )
         if (!sessionKey) continue
+
+        const normalizedSession = {
+          ...session,
+          session_key: sessionKey,
+          sessionKey,
+        }
+        const agentId = parseAgentIdFromSessionKey(sessionKey)
+        if (shouldFilterUnknownAgents && agentId !== 'main' && !knownAgentIds.has(agentId)) {
+          // 过滤已删除智能体遗留会话，避免后续 getMessages 触发网关生成空壳 agent 目录。
+          continue
+        }
+        let numericCount = extractSessionMessageCount(session)
+        if (!(Number.isFinite(numericCount) && numericCount > 0)) {
+          const cachedCount = sessionMessageCountCacheRef.current.get(sessionKey)
+          if (Number.isFinite(cachedCount) && cachedCount >= 0) {
+            numericCount = cachedCount
+          } else {
+            missingCountSessions.push({ sessionKey, agentId })
+          }
+        } else {
+          sessionMessageCountCacheRef.current.set(sessionKey, numericCount)
+        }
+        if (Number.isFinite(numericCount) && numericCount > 0) {
+          messageCountByAgent.set(agentId, (messageCountByAgent.get(agentId) || 0) + numericCount)
+        }
 
         // 过滤重复 main 会话
         if (sessionKey === 'main' || sessionKey === 'agent:main' || sessionKey === 'agent:main:main') {
           if (!agentMap.has('main')) {
-            agentMap.set('main', { ...session, session_key: 'main' })
+            agentMap.set('main', { ...normalizedSession, session_key: 'main', sessionKey: 'main' })
           }
           continue
         }
 
-        const agentId = parseAgentIdFromSessionKey(sessionKey)
         if (!agentMap.has(agentId) || sessionKey.endsWith(':main')) {
-          agentMap.set(agentId, session)
+          agentMap.set(agentId, normalizedSession)
         }
       }
 
@@ -810,28 +1091,62 @@ export default function Chat({ switchToAgent }) {
         if (!agentId) continue
         if (agentId === 'main') {
           if (!agentMap.has('main')) {
-            agentMap.set('main', { session_key: 'main' })
+            agentMap.set('main', { session_key: 'main', sessionKey: 'main' })
           }
           continue
         }
         if (!agentMap.has(agentId)) {
           agentMap.set(agentId, {
-            session_key: `agent:${agentId}:main`,
-            sessionKey: `agent:${agentId}:main`,
+            session_key: normalizeSessionKey(`agent:${agentId}:main`),
+            sessionKey: normalizeSessionKey(`agent:${agentId}:main`),
             session_id: null,
             created_at: null,
             updated_at: null,
+            message_count: 0,
           })
         }
       }
 
       if (!agentMap.has('main')) {
-        agentMap.set('main', { session_key: 'main' })
+        agentMap.set('main', { session_key: 'main', sessionKey: 'main' })
       }
 
-      const uniqueSessions = Array.from(agentMap.values()).filter((session) => {
-        return typeof session?.session_key === 'string' && session.session_key.trim()
-      })
+      if (missingCountSessions.length > 0) {
+        await Promise.all(
+          missingCountSessions.map(async ({ sessionKey, agentId }) => {
+            try {
+              const historyResult = await api.sessions.getMessages(sessionKey)
+              const messageCount =
+                historyResult.success && Array.isArray(historyResult.data)
+                  ? historyResult.data.length
+                  : 0
+              sessionMessageCountCacheRef.current.set(sessionKey, messageCount)
+              if (messageCount > 0) {
+                messageCountByAgent.set(agentId, (messageCountByAgent.get(agentId) || 0) + messageCount)
+              }
+            } catch (error) {
+              sessionMessageCountCacheRef.current.set(sessionKey, 0)
+            }
+          }),
+        )
+      }
+
+      const uniqueSessions = Array.from(agentMap.values())
+        .filter((session) => typeof session?.session_key === 'string' && session.session_key.trim())
+        .map((session) => {
+          const normalizedKey = normalizeSessionKey(session.session_key)
+          const agentId = parseAgentIdFromSessionKey(normalizedKey)
+          const totalCount = messageCountByAgent.get(agentId)
+          const fallbackCount = Number(session?.message_count ?? session?.messageCount ?? 0)
+          return {
+            ...session,
+            session_key: normalizedKey,
+            sessionKey: normalizedKey,
+            message_count: Number.isFinite(totalCount)
+              ? totalCount
+              : (Number.isFinite(fallbackCount) ? fallbackCount : 0),
+          }
+        })
 
       // main 固定置顶，其余按 session_key 稳定排序，防止闪动
       uniqueSessions.sort((a, b) => {
@@ -915,9 +1230,10 @@ export default function Chat({ switchToAgent }) {
   }, [])
 
   // 加载会话历史
-  const loadSessionHistory = async (sessionKey) => {
+  const loadSessionHistory = async (sessionKey, options = {}) => {
     try {
       const normalizedKey = normalizeSessionKey(sessionKey)
+      const applyToUi = options.applyToUi !== false
       // 🆕 使用统一 API 服务层
       const result = await api.sessions.getMessages(normalizedKey)
       if (result.success) {
@@ -932,16 +1248,35 @@ export default function Chat({ switchToAgent }) {
               ts = parsed
             }
           }
+          const normalizedContent = msg.role === 'assistant'
+            ? stripAssistantEnvelopeTags(extractTextFromGatewayMessage(msg))
+            : extractTextFromGatewayMessage(msg)
+          const content = typeof normalizedContent === 'string' ? normalizedContent.trim() : ''
+
           return {
             role: msg.role,
-            content: extractTextFromGatewayMessage(msg),
+            content,
+            tool_calls: Array.isArray(msg.tool_calls) ? msg.tool_calls : undefined,
             timestamp: ts,
             usage: msg.usage || null  // 🔥 包含 token 使用量
           }
+        }).filter((message, idx) => {
+          if (message.role !== 'assistant') return true
+          if (typeof message.content === 'string' && message.content.trim().length > 0) return true
+
+          const raw = messageList[idx]
+          const hasToolCalls = Array.isArray(raw?.tool_calls) && raw.tool_calls.length > 0
+          const hasToolBlocks = hasToolLikeBlocks(raw?.content)
+          return hasToolCalls || hasToolBlocks
         })
-        setMessages(formattedMessages)
+        if (applyToUi) {
+          setMessages(formattedMessages)
+        }
+        sessionMessageCountCacheRef.current.set(normalizedKey, formattedMessages.length)
         // 🔥 消息加载完成后滚动到底部
-        setTimeout(() => scrollToBottom('instant'), 100)
+        if (applyToUi) {
+          setTimeout(() => scrollToBottom('instant'), 100)
+        }
         // 🔥 调试：打印每条消息的 usage 信息
         console.log('加载会话历史:', sessionKey, formattedMessages.length, '条消息')
         formattedMessages.forEach((msg, idx) => {
@@ -951,12 +1286,17 @@ export default function Chat({ switchToAgent }) {
         })
       } else {
         console.log('会话暂无历史消息:', sessionKey, result.error)
-        setMessages([])
+        if (applyToUi) {
+          setMessages([])
+        }
       }
     } catch (err) {
       console.error('[loadSessionHistory] 加载失败:', err)
       // 发生错误时设置空消息，防止 UI 崩溃
-      setMessages([])
+      const applyToUi = options.applyToUi !== false
+      if (applyToUi) {
+        setMessages([])
+      }
     }
   }
 
@@ -974,23 +1314,25 @@ export default function Chat({ switchToAgent }) {
 
   // 保存智能体配置（仅 provider/model）
   const saveAgentModelConfig = (sessionKey, provider, model) => {
-    const existingMeta = agentMetadata[sessionKey] || {}
-    const newMetadata = {
-      ...agentMetadata,
-      [sessionKey]: {
-        ...existingMeta,
-        updatedAt: Date.now(),
-        ...(provider !== undefined && { provider }),
-        ...(model !== undefined && { model }),
+    setAgentMetadata(prev => {
+      const existingMeta = prev[sessionKey] || {}
+      const newMetadata = {
+        ...prev,
+        [sessionKey]: {
+          ...existingMeta,
+          updatedAt: Date.now(),
+          ...(provider !== undefined && { provider }),
+          ...(model !== undefined && { model }),
+        }
       }
-    }
-    setAgentMetadata(newMetadata)
-    localStorage.setItem('agent_model_config', JSON.stringify(newMetadata))
+      localStorage.setItem('agent_model_config', JSON.stringify(newMetadata))
+      return newMetadata
+    })
   }
 
   // 保存当前智能体的模型配置
   const saveCurrentAgentModel = (provider, model) => {
-    saveAgentModelConfig(currentSessionKey, provider, model)
+    saveAgentModelConfig(normalizeSessionKey(currentSessionKey), provider, model)
   }
 
   // 删除智能体配置
@@ -1086,7 +1428,7 @@ export default function Chat({ switchToAgent }) {
 
   // 🔥 流式输出时实时滚动到底部
   useEffect(() => {
-    if (isStreaming && streamingContent) {
+    if (isStreaming && streamingContent && runtimeSessionKeyRef.current === currentSessionKeyRef.current) {
       // 使用 requestAnimationFrame 确保在下一帧渲染时滚动，性能更好
       const rafId = requestAnimationFrame(() => {
         scrollToBottom('instant')
@@ -1097,43 +1439,53 @@ export default function Chat({ switchToAgent }) {
 
   // 切换会话
   const handleSelectSession = async (sessionKey) => {
+    const normalizedSessionKey = normalizeSessionKey(sessionKey)
     // 🔥 移除 isLoading 检查，允许随时切换会话
-    if (sessionKey === currentSessionKey) {
+    if (normalizedSessionKey === currentSessionKey) {
       // 即使是相同会话，也清空未读数
       setUnreadCounts(prev => ({
         ...prev,
-        [sessionKey]: 0
+        [normalizedSessionKey]: 0
       }))
       return
     }
 
     try {
-      console.log('切换到会话:', sessionKey)
-      setCurrentSessionKey(sessionKey)
+      console.log('切换到会话:', normalizedSessionKey)
+      debugModelFlow('session.switch.start', {
+        fromSessionKey: normalizeSessionKey(currentSessionKey),
+        toSessionKey: normalizedSessionKey,
+      })
+      setCurrentSessionKey(normalizedSessionKey)
       // 持久化会话选择到 localStorage
-      localStorage.setItem('openclaw_current_session', sessionKey)
+      localStorage.setItem('openclaw_current_session', normalizedSessionKey)
       setMessages([])
 
       // 🔥 清空该会话的未读计数
       setUnreadCounts(prev => ({
         ...prev,
-        [sessionKey]: 0
+        [normalizedSessionKey]: 0
       }))
 
-      // 恢复该智能体的模型配置
-      const meta = agentMetadata[sessionKey]
-      const selected = pickProviderSelection(
+      // 会话切换时优先恢复该智能体已保存模型；仅在失效时自动回退
+      const selected = pickSelectionForSession(
         config?.ai_provider,
-        meta?.provider || '',
-        meta?.model || ''
+        normalizedSessionKey,
+        currentProvider,
+        currentModel,
       )
       if (selected.provider) {
+        debugModelFlow('session.switch.selection', {
+          toSessionKey: normalizedSessionKey,
+          selectedProvider: selected.provider,
+          selectedModel: selected.model,
+        })
         setCurrentProvider(selected.provider)
         setCurrentModel(selected.model)
       }
 
       // 加载会话历史
-      await loadSessionHistory(sessionKey)
+      await loadSessionHistory(normalizedSessionKey)
     } catch (err) {
       console.error('[handleSelectSession] 切换会话失败:', err)
     }
@@ -1162,8 +1514,12 @@ export default function Chat({ switchToAgent }) {
         name: displayName,
         workspace: null, // 使用默认路径
         emoji: '🤖',
-        avatar: null
+        avatar: ''
       })
+
+      if (!createResult.success) {
+        throw new Error(createResult.error || '创建智能体失败')
+      }
 
       console.log('✅ 智能体创建成功:', createResult.data)
 
@@ -1301,6 +1657,7 @@ export default function Chat({ switchToAgent }) {
       setIsLoading(false)
       setIsStreaming(false)
       setAgentStatus('')
+      setRuntimeSessionKey(null)
       return
     }
 
@@ -1321,6 +1678,7 @@ export default function Chat({ switchToAgent }) {
   // 🔥 实际执行发送消息的逻辑
   const executeSendMessage = async (inputText, sessionKey, provider, model, isFromQueue = false) => {
     const normalizedSessionKey = normalizeSessionKey(sessionKey)
+    setRuntimeSessionKey(normalizedSessionKey)
 
     // 🔥 记忆上下文增强：搜索相关记忆
     let memoryContext = null
@@ -1347,12 +1705,32 @@ export default function Chat({ switchToAgent }) {
       ? `[相关记忆上下文]\n${memoryContext}\n\n[用户问题]\n${inputText}`
       : inputText
 
+    debugModelFlow('chat.send.request', {
+      isFromQueue,
+      requestSessionKey: normalizedSessionKey,
+      requestProvider: provider || '',
+      requestModel: model || '',
+      hasMemoryContext: Boolean(memoryContext),
+      inputLen: inputText.length,
+      inputPreview: toDebugTextPreview(inputText),
+      enhancedLen: enhancedMessage.length,
+    })
+
     console.log('📨 发送消息到 Gateway, session_key:', sessionKey, '→ normalized:', normalizedSessionKey, 'provider:', provider, 'model:', model, 'streaming:', useStreaming)
     const result = await api.chat.send({
       message: enhancedMessage,
       sessionKey: normalizedSessionKey,
       provider: provider,
       model: model
+    })
+    debugModelFlow('chat.send.ack', {
+      isFromQueue,
+      requestSessionKey: normalizedSessionKey,
+      requestProvider: provider || '',
+      requestModel: model || '',
+      success: Boolean(result?.success),
+      runId: result?.data?.runId || '',
+      errorPreview: result?.success ? '' : toDebugTextPreview(result?.error || '未知错误'),
     })
 
     // chat.send 只返回 ACK，真正内容通过 Gateway `chat` 事件推送
@@ -1369,6 +1747,7 @@ export default function Chat({ switchToAgent }) {
         setIsLoading(false)
         setIsStreaming(false)
         setAgentStatus('')
+        setRuntimeSessionKey(null)
       }
     }
   }
@@ -1409,6 +1788,9 @@ export default function Chat({ switchToAgent }) {
 
     const modelSetup = resolveModelSetup()
     if (!modelSetup.ready) {
+      debugModelFlow('chat.send.blocked', {
+        reason: modelSetup.reason || '模型未就绪',
+      })
       toast.error('请先配置模型', modelSetup.reason)
       return
     }
@@ -1419,6 +1801,12 @@ export default function Chat({ switchToAgent }) {
     // 如果正在处理消息，加入队列
     if (isLoading) {
       console.log('⏳ 消息加入队列，当前队列长度:', messageQueueRef.current.length + 1)
+      debugModelFlow('chat.send.queued', {
+        queueLength: messageQueueRef.current.length + 1,
+        selectedProvider,
+        selectedModel,
+        inputPreview: toDebugTextPreview(inputText),
+      })
       const queuedMessage = {
         input: inputText,
         sessionKey: currentSessionKey,
@@ -1437,6 +1825,7 @@ export default function Chat({ switchToAgent }) {
     setInput('')
     setIsLoading(true)
     setAgentStatus('thinking')
+    setRuntimeSessionKey(normalizeSessionKey(currentSessionKey))
 
     if (useStreaming) {
       setIsStreaming(true)
@@ -1445,30 +1834,6 @@ export default function Chat({ switchToAgent }) {
 
     // 执行发送
     await executeSendMessage(inputText, currentSessionKey, selectedProvider, selectedModel)
-  }
-
-  // 格式化工具调用显示
-  const formatToolCalls = (toolCalls) => {
-    let content = '**正在调用工具...**\n\n'
-    for (const toolCall of toolCalls) {
-      // 🔧 兼容两种格式：
-      // 1. ToolCall 格式：{ name, arguments }
-      // 2. ToolCallDelta 格式（流式）：{ function: { name, arguments } }
-      const name = toolCall.name || toolCall.function?.name || 'unknown'
-      const rawArgs = toolCall.arguments || toolCall.function?.arguments || '{}'
-
-      content += `**工具**: \`${name}\`\n\n`
-      try {
-        const args = typeof rawArgs === 'string'
-          ? JSON.parse(rawArgs)
-          : rawArgs
-        content += `**参数**:\n\`\`\`json\n${JSON.stringify(args, null, 2)}\n\`\`\`\n\n`
-      } catch {
-        content += `**参数**: ${rawArgs}\n\n`
-      }
-    }
-    content += '*工具执行中...*'
-    return content
   }
 
   const handleKeyPress = (e) => {
@@ -1517,12 +1882,34 @@ export default function Chat({ switchToAgent }) {
   const availableModelsKey = availableModels.join('|')
   const modelSetupState = resolveModelSetup()
   const currentProviderInfo = providerInfo[effectiveProvider] || { name: effectiveProvider, color: 'text-gray-500' }
+  const normalizedCurrentSession = normalizeSessionKey(currentSessionKey)
+  const isCurrentSessionRuntime =
+    !!runtimeSessionKey && normalizeSessionKey(runtimeSessionKey) === normalizedCurrentSession
+  const visibleIsStreaming = isStreaming && isCurrentSessionRuntime
+  const visibleStreamingContent = visibleIsStreaming ? streamingContent : ''
+  const visibleIsLoading = isLoading && isCurrentSessionRuntime
+  const groupedMessagesForDisplay = mergeAdjacentSystemGroups(
+    groupMessages(messages).filter(groupHasDisplayContent),
+  )
+  const hasDisplayMessages = groupedMessagesForDisplay.length > 0
 
   useEffect(() => {
     if (effectiveProvider && effectiveProvider !== currentProvider) {
+      debugModelFlow('model.auto.providerFallback', {
+        reason: 'effectiveProvider changed',
+        fromProvider: currentProvider,
+        toProvider: effectiveProvider,
+      })
       setCurrentProvider(effectiveProvider)
     }
     if (availableModels.length > 0 && !availableModels.includes(currentModel)) {
+      debugModelFlow('model.auto.modelFallback', {
+        reason: 'current model not in available models',
+        provider: effectiveProvider,
+        fromModel: currentModel,
+        toModel: availableModels[0],
+        availableModels,
+      })
       setCurrentModel(availableModels[0])
     }
   }, [effectiveProvider, currentProvider, currentModel, availableModels, availableModelsKey])
@@ -1566,9 +1953,19 @@ export default function Chat({ switchToAgent }) {
                 <Select
                   value={effectiveProvider || '_none'}
                   onValueChange={(value) => {
+                    debugModelFlow('model.manual.providerChange', {
+                      fromProvider: currentProvider,
+                      toProvider: value,
+                      fromModel: currentModel,
+                    })
                     setCurrentProvider(value)
                     const models = getAvailableModels(value)
                     const newModel = models[0] || ''
+                    debugModelFlow('model.manual.providerChange.resultModel', {
+                      provider: value,
+                      selectedModel: newModel,
+                      availableModels: models,
+                    })
                     setCurrentModel(newModel)
                     saveCurrentAgentModel(value, newModel)
                   }}
@@ -1595,6 +1992,11 @@ export default function Chat({ switchToAgent }) {
                 <Select
                   value={currentModel}
                   onValueChange={(value) => {
+                    debugModelFlow('model.manual.modelChange', {
+                      provider: effectiveProvider,
+                      fromModel: currentModel,
+                      toModel: value,
+                    })
                     setCurrentModel(value)
                     saveCurrentAgentModel(effectiveProvider, value)
                   }}
@@ -1643,7 +2045,7 @@ export default function Chat({ switchToAgent }) {
           </div>
 
           {/* 欢迎界面 */}
-          {messages.length === 0 && (
+          {!hasDisplayMessages && (
             <div className="flex-1 flex items-center justify-center p-4">
               <div className="text-center">
                 <div className="w-16 h-16 md:w-20 md:h-20 rounded-2xl bg-surface-elevated flex items-center justify-center mb-4 md:mb-6 mx-auto">
@@ -1660,28 +2062,28 @@ export default function Chat({ switchToAgent }) {
           )}
 
           {/* 消息区域 */}
-          {messages.length > 0 && (() => {
-            // 计算消息分组
-            const groupedMessages = groupMessages(messages)
-            const lastGroup = groupedMessages[groupedMessages.length - 1]
+          {hasDisplayMessages && (() => {
             const agentName = getAgentDisplayNameSync(currentSessionKey)
 
             return (
               <ScrollArea ref={scrollAreaRef} className="flex-1 p-2 sm:p-3 md:p-4 lg:p-5 xl:p-6">
                 <div className="w-full max-w-full mx-auto px-1 sm:px-2 md:px-3">
                   {/* 使用分组后的消息渲染 */}
-                  {groupedMessages.map((group, idx) => (
+                  {groupedMessagesForDisplay.map((group, idx) => (
                     <MessageGroup
                       key={group.id}
                       group={group}
                       agentName={agentName}
-                      isStreaming={isStreaming && idx === groupedMessages.length - 1 && group.role === 'assistant'}
-                      streamingContent={isStreaming && idx === groupedMessages.length - 1 && group.role === 'assistant' ? streamingContent : ''}
+                      isStreaming={visibleIsStreaming && idx === groupedMessagesForDisplay.length - 1 && group.role === 'assistant'}
+                      streamingContent={visibleIsStreaming && idx === groupedMessagesForDisplay.length - 1 && group.role === 'assistant' ? visibleStreamingContent : ''}
                     />
                   ))}
 
                   {/* 流式输出内容（单独显示，最后一组不是 assistant 时） */}
-                  {isStreaming && streamingContent && messages.length > 0 && messages[messages.length - 1]?.role !== 'assistant' && (
+                  {visibleIsStreaming
+                    && visibleStreamingContent
+                    && groupedMessagesForDisplay.length > 0
+                    && groupedMessagesForDisplay[groupedMessagesForDisplay.length - 1]?.role !== 'assistant' && (
                     <MessageGroup
                       key="streaming"
                       group={{
@@ -1693,12 +2095,12 @@ export default function Chat({ switchToAgent }) {
                       }}
                       agentName={agentName}
                       isStreaming={true}
-                      streamingContent={streamingContent}
+                      streamingContent={visibleStreamingContent}
                     />
                   )}
 
                   {/* 🔥 加载状态（流式和非流式通用）- 显示动态状态 */}
-                  {isLoading && (
+                  {visibleIsLoading && (
                     <div className="message-group message-group--assistant">
                       <div className="message-group__avatar">
                         <div className="chat-avatar assistant">
@@ -1749,7 +2151,7 @@ export default function Chat({ switchToAgent }) {
                 />
                 <Button
                   onClick={sendMessage}
-                  disabled={!input.trim() || isLoading || !modelSetupState.ready}
+                  disabled={!input.trim() || visibleIsLoading || !modelSetupState.ready}
                   className="h-9 sm:h-10 md:h-11 px-2.5 sm:px-3 md:px-4"
                 >
                   <Send className="w-4 h-4 md:mr-2" />
@@ -1772,8 +2174,18 @@ export default function Chat({ switchToAgent }) {
             if (result.success) {
               const cfg = result.data
               setConfig(cfg)
-              const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+              const selected = pickSelectionForSession(
+                cfg?.ai_provider,
+                currentSessionKeyRef.current || currentSessionKey || 'main',
+                currentProvider,
+                currentModel,
+              )
               if (selected.provider) {
+                debugModelFlow('config.modal.saved.selection', {
+                  selectedProvider: selected.provider,
+                  selectedModel: selected.model,
+                  configuredProviders: getConfiguredProviderEntries(cfg?.ai_provider).map((item) => item.id),
+                })
                 setCurrentProvider(selected.provider)
                 setCurrentModel(selected.model)
               }

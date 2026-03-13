@@ -10,7 +10,6 @@ import {
   Wrench,
   Globe,
   Brain,
-  Zap,
   DollarSign,
   BookOpen,
   Smartphone,
@@ -64,7 +63,6 @@ const navigationGroups = [
     title: '能力',
     items: [
       { id: 'skills', label: 'Skills', icon: Wrench },
-      { id: 'tools', label: '工具列表', icon: Zap },
       { id: 'toolManager', label: '工具管理', icon: Settings },
       { id: 'browser', label: '浏览器', icon: Globe },
       { id: 'schedule', label: '定时任务', icon: Clock },
