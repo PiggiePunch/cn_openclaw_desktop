@@ -1,11 +1,104 @@
 // OpenClaw 原版配置格式支持
 // 用于加载/保存兼容原版 openclaw 的配置文件
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use anyhow::Result;
+use serde::{de::Visitor, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+// ==================== Streaming Mode 枚举 ====================
+
+/// Telegram streaming 模式（兼容原版 openclaw 的字符串枚举）
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamingMode {
+    #[default]
+    Off,
+    Partial,
+    Block,
+    Progress,
+}
+
+impl StreamingMode {
+    fn is_none(&self) -> bool {
+        *self == StreamingMode::Off
+    }
+}
+
+/// 自定义反序列化器：兼容原版的字符串枚举和布尔值
+/// 原版: "partial", "block", "off", "progress"
+/// 桌面版: true/false
+fn deserialize_streaming<'de, D>(deserializer: D) -> Result<Option<StreamingMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StreamingVisitor;
+
+    impl<'de> Visitor<'de> for StreamingVisitor {
+        type Value = Option<StreamingMode>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string (partial, block, off, progress) or a boolean")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match value {
+                "partial" => Ok(Some(StreamingMode::Partial)),
+                "block" => Ok(Some(StreamingMode::Block)),
+                "progress" => Ok(Some(StreamingMode::Progress)),
+                "off" | "" => Ok(Some(StreamingMode::Off)),
+                _ => {
+                    // 未知值，记录警告并使用默认值
+                    log::warn!("未知的 streaming 值: {}, 使用默认值 Off", value);
+                    Ok(Some(StreamingMode::Off))
+                }
+            }
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            // 布尔值转换：true -> Partial, false -> Off
+            if value {
+                Ok(Some(StreamingMode::Partial))
+            } else {
+                Ok(Some(StreamingMode::Off))
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(StreamingVisitor)
+}
+
+/// 序列化 streaming 模式
+fn serialize_streaming<S>(value: &Option<StreamingMode>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(mode) => serializer.serialize_str(&format!("{:?}", mode).to_lowercase()),
+        None => serializer.serialize_none(),
+    }
+}
 
 // ==================== 配置版本检测 ====================
 
@@ -20,7 +113,8 @@ pub enum ConfigVersion {
 /// 检测配置版本
 pub fn detect_version(json: &serde_json::Value) -> ConfigVersion {
     // 新版有 models.providers 结构
-    if json.get("models")
+    if json
+        .get("models")
         .and_then(|m| m.get("providers"))
         .map(|p| p.is_object())
         .unwrap_or(false)
@@ -162,7 +256,10 @@ impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
             defaults: AgentDefaults::default(),
-            list: vec![AgentEntry { id: "main".to_string(), ..Default::default() }],
+            list: vec![AgentEntry {
+                id: "main".to_string(),
+                ..Default::default()
+            }],
         }
     }
 }
@@ -298,8 +395,13 @@ pub struct TelegramChannelConfig {
     pub bot_token: Option<String>,
     #[serde(default, rename = "groupPolicy")]
     pub group_policy: Option<String>,
-    #[serde(default)]
-    pub streaming: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_streaming",
+        serialize_with = "serialize_streaming",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub streaming: Option<StreamingMode>,
     #[serde(default)]
     pub accounts: HashMap<String, TelegramAccountConfigV2>,
 }
@@ -318,8 +420,13 @@ pub struct TelegramAccountConfigV2 {
     pub allow_from: Vec<String>,
     #[serde(default, rename = "groupPolicy")]
     pub group_policy: Option<String>,
-    #[serde(default)]
-    pub streaming: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_streaming",
+        serialize_with = "serialize_streaming",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub streaming: Option<StreamingMode>,
     #[serde(default, rename = "proxyUrl")]
     pub proxy_url: Option<String>,
 }
@@ -347,7 +454,9 @@ pub struct TelegramGroupConfig {
     pub require_mention: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiscordChannelConfig {
@@ -400,7 +509,9 @@ pub struct GatewayConfigV2 {
     pub tailscale: Option<TailscaleConfig>,
 }
 
-fn default_gateway_port() -> u16 { 18789 }
+fn default_gateway_port() -> u16 {
+    18789
+}
 
 impl Default for GatewayConfigV2 {
     fn default() -> Self {
@@ -576,7 +687,11 @@ impl ConfigMigrator {
 
         // 6. 创建默认绑定
         for (idx, acc) in v1.channels.telegram.accounts.iter().enumerate() {
-            let account_id = if idx == 0 { "default".to_string() } else { acc.id.clone() };
+            let account_id = if idx == 0 {
+                "default".to_string()
+            } else {
+                acc.id.clone()
+            };
             v2.bindings.push(BindingConfig {
                 agent_id: "main".to_string(),
                 r#match: BindingMatch {
@@ -597,81 +712,107 @@ impl ConfigMigrator {
     }
 
     /// 迁移 AI 提供商配置
-    fn migrate_providers(ai_provider: &crate::config::AIProvider) -> HashMap<String, ProviderConfig> {
+    fn migrate_providers(
+        ai_provider: &crate::config::AIProvider,
+    ) -> HashMap<String, ProviderConfig> {
         let mut providers = HashMap::new();
         let current = &ai_provider.current;
 
         // 通义千问
         if !ai_provider.qwen.api_key.is_empty() || current == "qwen" {
-            providers.insert("qwen".to_string(), ProviderConfig {
-                base_url: if ai_provider.qwen.base_url.is_empty() {
-                    "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
-                } else {
-                    ai_provider.qwen.base_url.clone()
+            providers.insert(
+                "qwen".to_string(),
+                ProviderConfig {
+                    base_url: if ai_provider.qwen.base_url.is_empty() {
+                        "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()
+                    } else {
+                        ai_provider.qwen.base_url.clone()
+                    },
+                    api_key: ai_provider.qwen.api_key.clone(),
+                    api: "openai-chat".to_string(),
+                    models: Self::build_model_list(
+                        &ai_provider.qwen.custom_models,
+                        &ai_provider.qwen.model,
+                    ),
                 },
-                api_key: ai_provider.qwen.api_key.clone(),
-                api: "openai-chat".to_string(),
-                models: Self::build_model_list(&ai_provider.qwen.custom_models, &ai_provider.qwen.model),
-            });
+            );
         }
 
         // DeepSeek
         if !ai_provider.deepseek.api_key.is_empty() || current == "deepseek" {
-            providers.insert("deepseek".to_string(), ProviderConfig {
-                base_url: if ai_provider.deepseek.base_url.is_empty() {
-                    "https://api.deepseek.com/v1".to_string()
-                } else {
-                    ai_provider.deepseek.base_url.clone()
+            providers.insert(
+                "deepseek".to_string(),
+                ProviderConfig {
+                    base_url: if ai_provider.deepseek.base_url.is_empty() {
+                        "https://api.deepseek.com/v1".to_string()
+                    } else {
+                        ai_provider.deepseek.base_url.clone()
+                    },
+                    api_key: ai_provider.deepseek.api_key.clone(),
+                    api: "openai-chat".to_string(),
+                    models: Self::build_model_list(
+                        &ai_provider.deepseek.custom_models,
+                        &ai_provider.deepseek.model,
+                    ),
                 },
-                api_key: ai_provider.deepseek.api_key.clone(),
-                api: "openai-chat".to_string(),
-                models: Self::build_model_list(&ai_provider.deepseek.custom_models, &ai_provider.deepseek.model),
-            });
+            );
         }
 
         // 智谱 GLM
         if let Some(ref zhipu) = ai_provider.zhipu {
             if !zhipu.api_key.is_empty() || current == "zhipu" {
-                providers.insert("zhipu".to_string(), ProviderConfig {
-                    base_url: if zhipu.base_url.is_empty() {
-                        "https://open.bigmodel.cn/api/paas/v4".to_string()
-                    } else {
-                        zhipu.base_url.clone()
+                providers.insert(
+                    "zhipu".to_string(),
+                    ProviderConfig {
+                        base_url: if zhipu.base_url.is_empty() {
+                            "https://open.bigmodel.cn/api/paas/v4".to_string()
+                        } else {
+                            zhipu.base_url.clone()
+                        },
+                        api_key: zhipu.api_key.clone(),
+                        api: "openai-chat".to_string(),
+                        models: Self::build_model_list(&zhipu.custom_models, &zhipu.model),
                     },
-                    api_key: zhipu.api_key.clone(),
-                    api: "openai-chat".to_string(),
-                    models: Self::build_model_list(&zhipu.custom_models, &zhipu.model),
-                });
+                );
             }
         }
 
         // OpenAI
         if !ai_provider.openai.api_key.is_empty() || current == "openai" {
-            providers.insert("openai".to_string(), ProviderConfig {
-                base_url: if ai_provider.openai.base_url.is_empty() {
-                    "https://api.openai.com/v1".to_string()
-                } else {
-                    ai_provider.openai.base_url.clone()
+            providers.insert(
+                "openai".to_string(),
+                ProviderConfig {
+                    base_url: if ai_provider.openai.base_url.is_empty() {
+                        "https://api.openai.com/v1".to_string()
+                    } else {
+                        ai_provider.openai.base_url.clone()
+                    },
+                    api_key: ai_provider.openai.api_key.clone(),
+                    api: "openai-chat".to_string(),
+                    models: Self::build_model_list(
+                        &ai_provider.openai.custom_models,
+                        &ai_provider.openai.model,
+                    ),
                 },
-                api_key: ai_provider.openai.api_key.clone(),
-                api: "openai-chat".to_string(),
-                models: Self::build_model_list(&ai_provider.openai.custom_models, &ai_provider.openai.model),
-            });
+            );
         }
 
         // 其他提供商...
         // 保存当前选择的提供商
         if !providers.contains_key(current) {
-            providers.insert(current.clone(), ProviderConfig {
-                base_url: String::new(),
-                api_key: String::new(),
-                api: "openai-chat".to_string(),
-                models: vec![ModelDefinition {
-                    id: "default".to_string(),
-                    name: Some("Default Model".to_string()),
-                    ..Default::default()
-                }],
-            });
+            providers.insert(
+                current.clone(),
+                ProviderConfig {
+                    base_url: String::new(),
+                    api_key: String::new(),
+                    api: "openai-chat".to_string(),
+                    models: vec![ModelDefinition {
+                        id: "default".to_string(),
+                        name: Some("Default Model".to_string()),
+                        ..Default::default()
+                    }],
+                },
+            );
         }
 
         providers
@@ -680,11 +821,14 @@ impl ConfigMigrator {
     /// 构建模型列表
     fn build_model_list(custom_models: &[String], default_model: &str) -> Vec<ModelDefinition> {
         if !custom_models.is_empty() {
-            custom_models.iter().map(|m| ModelDefinition {
-                id: m.clone(),
-                name: Some(m.clone()),
-                ..Default::default()
-            }).collect()
+            custom_models
+                .iter()
+                .map(|m| ModelDefinition {
+                    id: m.clone(),
+                    name: Some(m.clone()),
+                    ..Default::default()
+                })
+                .collect()
         } else {
             vec![ModelDefinition {
                 id: default_model.to_string(),
@@ -699,7 +843,13 @@ impl ConfigMigrator {
         let default_model = match current {
             "qwen" => &ai_provider.qwen.model,
             "deepseek" => &ai_provider.deepseek.model,
-            "zhipu" => if let Some(ref z) = ai_provider.zhipu { &z.model } else { "glm-4" },
+            "zhipu" => {
+                if let Some(ref z) = ai_provider.zhipu {
+                    &z.model
+                } else {
+                    "glm-4"
+                }
+            }
             "openai" => &ai_provider.openai.model,
             _ => "default",
         };
@@ -712,44 +862,80 @@ impl ConfigMigrator {
 
         // Telegram: Vec -> HashMap
         for (idx, acc) in channels.telegram.accounts.iter().enumerate() {
-            let account_id = if idx == 0 { "default".to_string() } else { acc.id.clone() };
+            let account_id = if idx == 0 {
+                "default".to_string()
+            } else {
+                acc.id.clone()
+            };
             let mut groups = HashMap::new();
             for g in &acc.allowed_groups {
-                groups.insert(g.clone(), TelegramGroupConfig {
-                    enabled: true,
-                    require_mention: false,
-                });
+                groups.insert(
+                    g.clone(),
+                    TelegramGroupConfig {
+                        enabled: true,
+                        require_mention: false,
+                    },
+                );
             }
 
-            v2.telegram.accounts.insert(account_id, TelegramAccountConfigV2 {
-                bot_token: if !acc.bot_token.is_empty() { Some(acc.bot_token.clone()) } else { None },
-                enabled: acc.enabled,
-                groups,
-                allow_from: acc.allowed_users.clone(),
-                proxy_url: acc.proxy_url.clone(),
-                ..Default::default()
-            });
+            v2.telegram.accounts.insert(
+                account_id,
+                TelegramAccountConfigV2 {
+                    bot_token: if !acc.bot_token.is_empty() {
+                        Some(acc.bot_token.clone())
+                    } else {
+                        None
+                    },
+                    enabled: acc.enabled,
+                    groups,
+                    allow_from: acc.allowed_users.clone(),
+                    proxy_url: acc.proxy_url.clone(),
+                    ..Default::default()
+                },
+            );
         }
         v2.telegram.enabled = channels.telegram.enabled;
 
         // Discord
         for (idx, acc) in channels.discord.accounts.iter().enumerate() {
-            let account_id = if idx == 0 { "default".to_string() } else { acc.id.clone() };
-            v2.discord.accounts.insert(account_id, DiscordAccountConfigV2 {
-                bot_token: if !acc.bot_token.is_empty() { Some(acc.bot_token.clone()) } else { None },
-                enabled: acc.enabled,
-            });
+            let account_id = if idx == 0 {
+                "default".to_string()
+            } else {
+                acc.id.clone()
+            };
+            v2.discord.accounts.insert(
+                account_id,
+                DiscordAccountConfigV2 {
+                    bot_token: if !acc.bot_token.is_empty() {
+                        Some(acc.bot_token.clone())
+                    } else {
+                        None
+                    },
+                    enabled: acc.enabled,
+                },
+            );
         }
         v2.discord.enabled = channels.discord.enabled;
 
         // Slack
         for (idx, acc) in channels.slack.accounts.iter().enumerate() {
-            let account_id = if idx == 0 { "default".to_string() } else { acc.id.clone() };
-            v2.slack.accounts.insert(account_id, SlackAccountConfigV2 {
-                bot_token: if !acc.bot_token.is_empty() { Some(acc.bot_token.clone()) } else { None },
-                app_token: acc.app_token.clone(),
-                enabled: acc.enabled,
-            });
+            let account_id = if idx == 0 {
+                "default".to_string()
+            } else {
+                acc.id.clone()
+            };
+            v2.slack.accounts.insert(
+                account_id,
+                SlackAccountConfigV2 {
+                    bot_token: if !acc.bot_token.is_empty() {
+                        Some(acc.bot_token.clone())
+                    } else {
+                        None
+                    },
+                    app_token: acc.app_token.clone(),
+                    enabled: acc.enabled,
+                },
+            );
         }
         v2.slack.enabled = channels.slack.enabled;
 
@@ -771,7 +957,9 @@ impl ConfigMigrator {
                     if let Some(model) = provider_config.models.first() {
                         v1.ai_provider.qwen.model = model.id.clone();
                     }
-                    v1.ai_provider.qwen.custom_models = provider_config.models.iter()
+                    v1.ai_provider.qwen.custom_models = provider_config
+                        .models
+                        .iter()
                         .skip(1)
                         .map(|m| m.id.clone())
                         .collect();
@@ -787,8 +975,16 @@ impl ConfigMigrator {
                     v1.ai_provider.zhipu = Some(ZhipuConfig {
                         api_key: provider_config.api_key.clone(),
                         base_url: provider_config.base_url.clone(),
-                        model: provider_config.models.first().map(|m| m.id.clone()).unwrap_or_else(|| "glm-4".to_string()),
-                        custom_models: provider_config.models.iter().map(|m| m.id.clone()).collect(),
+                        model: provider_config
+                            .models
+                            .first()
+                            .map(|m| m.id.clone())
+                            .unwrap_or_else(|| "glm-4".to_string()),
+                        custom_models: provider_config
+                            .models
+                            .iter()
+                            .map(|m| m.id.clone())
+                            .collect(),
                         enabled: !provider_config.api_key.is_empty(),
                         embedding_model: None,
                     });

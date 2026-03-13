@@ -2,17 +2,17 @@
 // 通过 Objective-C 桥接调用 macOS AVFoundation API 实现摄像头/麦克风权限请求
 
 #[cfg(target_os = "macos")]
-use objc::{class, msg_send, sel, sel_impl};
+use objc::runtime::{Class, Object, BOOL, NO, YES};
 #[cfg(target_os = "macos")]
-use objc::runtime::{Class, Object, BOOL, YES, NO};
+use objc::{class, msg_send, sel, sel_impl};
 #[cfg(target_os = "macos")]
 use std::ffi::{c_void, CString};
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
-use std::sync::Mutex;
-#[cfg(target_os = "macos")]
 use std::sync::Condvar;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -131,8 +131,7 @@ mod avfoundation_impl {
 
             // 调用 authorizationStatusForMediaType:
             // + (AVAuthorizationStatus)authorizationStatusForMediaType:(AVMediaType)type;
-            let status: i64 =
-                msg_send![avcapture_device_cls, authorizationStatusForMediaType: media_type_nsstring];
+            let status: i64 = msg_send![avcapture_device_cls, authorizationStatusForMediaType: media_type_nsstring];
 
             AVAuthorizationStatus::from_nsinteger(status)
         }

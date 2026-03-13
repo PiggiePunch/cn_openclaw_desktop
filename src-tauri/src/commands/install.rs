@@ -6,7 +6,7 @@
 // - 版本检查
 // - 手动更新
 
-use crate::openclaw_manager::{OpenClawManager, InstallStatus};
+use crate::openclaw_manager::OpenClawManager;
 use serde::{Deserialize, Serialize};
 
 /// 安装状态响应
@@ -26,12 +26,17 @@ pub async fn check_install_status() -> Result<InstallState, String> {
 
     let installed = manager.is_installed().await;
     let version = manager.get_installed_version().await;
+    let exec_path = manager.get_executable_path();
 
     Ok(InstallState {
         needs_install: !installed,
         installed,
         version,
-        install_path: Some(manager.install_dir().to_string_lossy().to_string()),
+        install_path: if installed {
+            Some(exec_path.to_string_lossy().to_string())
+        } else {
+            Some(manager.install_dir().to_string_lossy().to_string())
+        },
         error: None,
     })
 }
@@ -48,7 +53,7 @@ pub async fn install_openclaw() -> Result<InstallState, String> {
             needs_install: false,
             installed: true,
             version,
-            install_path: Some(manager.install_dir().to_string_lossy().to_string()),
+            install_path: Some(manager.get_executable_path().to_string_lossy().to_string()),
             error: None,
         });
     }
@@ -64,7 +69,7 @@ pub async fn install_openclaw() -> Result<InstallState, String> {
             needs_install: false,
             installed: status.installed,
             version: status.version,
-            install_path: status.install_path.map(|p| p.to_string_lossy().to_string()),
+            install_path: Some(manager.get_executable_path().to_string_lossy().to_string()),
             error: None,
         }),
         Err(e) => Ok(InstallState {

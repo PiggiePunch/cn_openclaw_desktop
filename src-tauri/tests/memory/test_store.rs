@@ -2,7 +2,9 @@
 // SQLite 存储层测试
 
 use openclaw_desktop::memory::store::MemoryStore;
-use openclaw_desktop::memory::types::{MemoryChunk, MemoryEntry, Metadata, MemorySource, ChunkMetadata};
+use openclaw_desktop::memory::types::{
+    ChunkMetadata, MemoryChunk, MemoryEntry, MemorySource, Metadata,
+};
 use uuid::Uuid;
 
 /// 清理测试数据库（删除数据但不删除数据库文件）

@@ -1,14 +1,13 @@
 // 配置管理模块
 // 支持原版 openclaw 格式 (models.providers, agents, bindings, etc.)
 
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use anyhow::Result;
-use std::fs;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     /// AI 提供商配置
     #[serde(default)]
@@ -70,9 +69,15 @@ pub struct FailoverAppConfig {
     pub fallback_providers: Vec<String>,
 }
 
-fn default_failover_enabled() -> bool { true }
-fn default_max_retries() -> u32 { 3 }
-fn default_cooldown_secs() -> u64 { 60 }
+fn default_failover_enabled() -> bool {
+    true
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_cooldown_secs() -> u64 {
+    60
+}
 
 impl Default for FailoverAppConfig {
     fn default() -> Self {
@@ -84,7 +89,6 @@ impl Default for FailoverAppConfig {
         }
     }
 }
-
 
 /// AI 提供商配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -374,16 +378,20 @@ pub struct MinimaxConfig {
     pub group_id: Option<String>,
 }
 
-fn default_minimax_model() -> String { "abab6.5s-chat".to_string() }
-fn default_minimax_base_url() -> String { "https://api.minimax.chat/v1".to_string() }
+fn default_minimax_model() -> String {
+    "MiniMax-M2.5".to_string()
+}
+fn default_minimax_base_url() -> String {
+    "https://api.minimaxi.com/anthropic".to_string()
+}
 
 impl Default for MinimaxConfig {
     fn default() -> Self {
         Self {
             enabled: false,
             api_key: String::new(),
-            model: "abab6.5s-chat".to_string(),
-            base_url: "https://api.minimax.chat/v1".to_string(),
+            model: "MiniMax-M2.5".to_string(),
+            base_url: "https://api.minimaxi.com/anthropic".to_string(),
             custom_models: Vec::new(),
             embedding_model: None,
             group_id: None,
@@ -855,7 +863,8 @@ impl Default for MemoryRefreshConfig {
 4. **待办事项和承诺** - 用户提到需要做的事情
 5. **有用的信息** - 可能在未来对话中有用的信息
 
-请以简洁的要点形式总结，不要重复已知信息。"#.to_string(),
+请以简洁的要点形式总结，不要重复已知信息。"#
+                .to_string(),
         }
     }
 }
@@ -920,9 +929,8 @@ impl ConfigManager {
                 // 解析 v2 格式并转换为 v1
                 match Self::parse_v2_and_convert(&content) {
                     Ok(v1_config) => {
-                        // 保存转换后的配置
-                        self.save(&v1_config)?;
-                        log::info!("原版配置已转换并保存为简化格式");
+                        // 只做内存转换，不覆盖原版 openclaw.json（避免破坏 Gateway 配置）
+                        log::info!("原版配置已转换为简化格式（内存）");
                         return Ok(v1_config);
                     }
                     Err(e) => {
@@ -934,9 +942,25 @@ impl ConfigManager {
             // 尝试作为 v1 格式解析
             match serde_json::from_str::<AppConfig>(&content) {
                 Ok(config) => Ok(config),
-                Err(e) => {
-                    log::error!("配置解析失败: {}", e);
-                    Err(anyhow::anyhow!("配置解析失败: {}", e))
+                Err(v1_err) => {
+                    // 兜底：即使未检测到 v2，也再尝试一次按 v2 解析并转换
+                    // 场景：用户配置可能是 v2 变体（如 channels.accounts 为对象）但缺少 models.providers 字段
+                    log::warn!("v1 配置解析失败: {}，尝试按 v2 格式转换", v1_err);
+
+                    match Self::parse_v2_and_convert(&content) {
+                        Ok(v1_config) => {
+                            log::info!("配置已按 v2 格式成功转换（内存）");
+                            Ok(v1_config)
+                        }
+                        Err(v2_err) => {
+                            log::error!("配置解析失败: v1={}, v2={}", v1_err, v2_err);
+                            Err(anyhow::anyhow!(
+                                "配置解析失败: v1={}, v2={}",
+                                v1_err,
+                                v2_err
+                            ))
+                        }
+                    }
                 }
             }
         } else {
@@ -955,7 +979,7 @@ impl ConfigManager {
 
     /// 解析 v2 格式并转换为 v1 格式
     fn parse_v2_and_convert(content: &str) -> Result<AppConfig> {
-        use crate::openclaw_config::{OpenClawConfig, ConfigMigrator};
+        use crate::openclaw_config::{ConfigMigrator, OpenClawConfig};
 
         let v2_config: OpenClawConfig = serde_json::from_str(content)?;
         let v1_config = ConfigMigrator::to_v1(&v2_config);
@@ -1052,8 +1076,7 @@ impl ConfigManager {
         let mut gateway_config: GatewayConfigFile = if gateway_config_path.exists() {
             let content = fs::read_to_string(&gateway_config_path)
                 .map_err(|e| anyhow::anyhow!("读取 Gateway 配置失败: {}", e))?;
-            serde_json::from_str(&content)
-                .unwrap_or_else(|_| GatewayConfigFile::default())
+            serde_json::from_str(&content).unwrap_or_else(|_| GatewayConfigFile::default())
         } else {
             GatewayConfigFile::default()
         };
@@ -1063,11 +1086,27 @@ impl ConfigManager {
         gateway_config.gateway.bind = "loopback".to_string();
         gateway_config.gateway.auth.auth_mode = "token".to_string();
         // 只在 token 不存在时才生成新 token（避免每次同步都改变导致 token mismatch）
-        if gateway_config.gateway.auth.token.is_none() || gateway_config.gateway.auth.token.as_ref().is_none_or(|t| t.is_empty()) {
-            gateway_config.gateway.auth.token = Some(format!("openclaw-desktop-{}", uuid::Uuid::new_v4()));
+        if gateway_config.gateway.auth.token.is_none()
+            || gateway_config
+                .gateway
+                .auth
+                .token
+                .as_ref()
+                .is_none_or(|t| t.is_empty())
+        {
+            gateway_config.gateway.auth.token =
+                Some(format!("openclaw-desktop-{}", uuid::Uuid::new_v4()));
             println!("🔑 生成新的 Gateway token");
         } else {
-            println!("🔑 保留现有 Gateway token: {:?}", gateway_config.gateway.auth.token.as_ref().map(|t| &t[..20.min(t.len())]));
+            println!(
+                "🔑 保留现有 Gateway token: {:?}",
+                gateway_config
+                    .gateway
+                    .auth
+                    .token
+                    .as_ref()
+                    .map(|t| &t[..20.min(t.len())])
+            );
         }
 
         // 5. 同步模型配置
@@ -1090,13 +1129,22 @@ impl ConfigManager {
                 let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 models.insert(format!("qwen/{}", id), serde_json::json!({}));
             }
-            providers.insert("qwen".to_string(), serde_json::json!({
-                "baseUrl": app_config.ai_provider.qwen.base_url,
-                "apiKey": app_config.ai_provider.qwen.api_key,
-                "models": qwen_models
-            }));
-            std::env::set_var("OPENCLAW_CHANNEL_QWEN_API_KEY", &app_config.ai_provider.qwen.api_key);
-            std::env::set_var("OPENCLAW_CHANNEL_QWEN_BASE_URL", &app_config.ai_provider.qwen.base_url);
+            providers.insert(
+                "qwen".to_string(),
+                serde_json::json!({
+                    "baseUrl": app_config.ai_provider.qwen.base_url,
+                    "apiKey": app_config.ai_provider.qwen.api_key,
+                    "models": qwen_models
+                }),
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_QWEN_API_KEY",
+                &app_config.ai_provider.qwen.api_key,
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_QWEN_BASE_URL",
+                &app_config.ai_provider.qwen.base_url,
+            );
         }
 
         // 智谱 GLM
@@ -1105,13 +1153,17 @@ impl ConfigManager {
                 // 🔥 优先使用自定义模型
                 let zhipu_models = if !zhipu.custom_models.is_empty() {
                     // 使用用户自定义的模型列表
-                    zhipu.custom_models.iter().map(|m| {
-                        serde_json::json!({
-                            "id": m,
-                            "name": m,
-                            "api": "openai-completions"
+                    zhipu
+                        .custom_models
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "id": m,
+                                "name": m,
+                                "api": "openai-completions"
+                            })
                         })
-                    }).collect::<Vec<_>>()
+                        .collect::<Vec<_>>()
                 } else {
                     // 否则使用默认模型
                     vec![
@@ -1125,19 +1177,27 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("zhipu/{}", id), serde_json::json!({}));
                 }
-                providers.insert("zhipu".to_string(), serde_json::json!({
-                    "api": "openai-completions",
-                    "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
-                    "apiKey": zhipu.api_key,
-                    "models": zhipu_models
-                }));
+                providers.insert(
+                    "zhipu".to_string(),
+                    serde_json::json!({
+                        "api": "openai-completions",
+                        "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
+                        "apiKey": zhipu.api_key,
+                        "models": zhipu_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_ZHIPU_API_KEY", &zhipu.api_key);
-                std::env::set_var("OPENCLAW_CHANNEL_ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4");
+                std::env::set_var(
+                    "OPENCLAW_CHANNEL_ZHIPU_BASE_URL",
+                    "https://open.bigmodel.cn/api/paas/v4",
+                );
             }
         }
 
         // DeepSeek
-        if app_config.ai_provider.deepseek.enabled && !app_config.ai_provider.deepseek.api_key.is_empty() {
+        if app_config.ai_provider.deepseek.enabled
+            && !app_config.ai_provider.deepseek.api_key.is_empty()
+        {
             let deepseek_models = vec![
                 serde_json::json!({"id": "deepseek-chat", "name": "deepseek-chat", "api": "openai-completions"}),
                 serde_json::json!({"id": "deepseek-coder", "name": "deepseek-coder", "api": "openai-completions"}),
@@ -1146,18 +1206,28 @@ impl ConfigManager {
                 let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 models.insert(format!("deepseek/{}", id), serde_json::json!({}));
             }
-            providers.insert("deepseek".to_string(), serde_json::json!({
-                "api": "openai-completions",
-                "baseUrl": "https://api.deepseek.com/v1",
-                "apiKey": app_config.ai_provider.deepseek.api_key,
-                "models": deepseek_models
-            }));
-            std::env::set_var("OPENCLAW_CHANNEL_DEEPSEEK_API_KEY", &app_config.ai_provider.deepseek.api_key);
-            std::env::set_var("OPENCLAW_CHANNEL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1");
+            providers.insert(
+                "deepseek".to_string(),
+                serde_json::json!({
+                    "api": "openai-completions",
+                    "baseUrl": "https://api.deepseek.com/v1",
+                    "apiKey": app_config.ai_provider.deepseek.api_key,
+                    "models": deepseek_models
+                }),
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_DEEPSEEK_API_KEY",
+                &app_config.ai_provider.deepseek.api_key,
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_DEEPSEEK_BASE_URL",
+                "https://api.deepseek.com/v1",
+            );
         }
 
         // 百度文心
-        if app_config.ai_provider.ernie.enabled && !app_config.ai_provider.ernie.api_key.is_empty() {
+        if app_config.ai_provider.ernie.enabled && !app_config.ai_provider.ernie.api_key.is_empty()
+        {
             let ernie_models = vec![
                 serde_json::json!({"id": "ernie-4.0-turbo-8k", "name": "ernie-4.0-turbo-8k"}),
                 serde_json::json!({"id": "ernie-4.0-turbo-128k", "name": "ernie-4.0-turbo-128k"}),
@@ -1168,13 +1238,22 @@ impl ConfigManager {
                 models.insert(format!("ernie/{}", id), serde_json::json!({}));
             }
             // 百度文心使用固定的 base_url，配置中没有此字段
-            providers.insert("ernie".to_string(), serde_json::json!({
-                "baseUrl": "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
-                "apiKey": app_config.ai_provider.ernie.api_key,
-                "models": ernie_models
-            }));
-            std::env::set_var("OPENCLAW_CHANNEL_ERNIE_API_KEY", &app_config.ai_provider.ernie.api_key);
-            std::env::set_var("OPENCLAW_CHANNEL_ERNIE_BASE_URL", "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop");
+            providers.insert(
+                "ernie".to_string(),
+                serde_json::json!({
+                    "baseUrl": "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
+                    "apiKey": app_config.ai_provider.ernie.api_key,
+                    "models": ernie_models
+                }),
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_ERNIE_API_KEY",
+                &app_config.ai_provider.ernie.api_key,
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_ERNIE_BASE_URL",
+                "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop",
+            );
         }
 
         // Moonshot
@@ -1189,13 +1268,19 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("moonshot/{}", id), serde_json::json!({}));
                 }
-                providers.insert("moonshot".to_string(), serde_json::json!({
-                    "baseUrl": "https://api.moonshot.cn/v1",
-                    "apiKey": moonshot.api_key,
-                    "models": moonshot_models
-                }));
+                providers.insert(
+                    "moonshot".to_string(),
+                    serde_json::json!({
+                        "baseUrl": "https://api.moonshot.cn/v1",
+                        "apiKey": moonshot.api_key,
+                        "models": moonshot_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_MOONSHOT_API_KEY", &moonshot.api_key);
-                std::env::set_var("OPENCLAW_CHANNEL_MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1");
+                std::env::set_var(
+                    "OPENCLAW_CHANNEL_MOONSHOT_BASE_URL",
+                    "https://api.moonshot.cn/v1",
+                );
             }
         }
 
@@ -1210,13 +1295,19 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("doubao/{}", id), serde_json::json!({}));
                 }
-                providers.insert("doubao".to_string(), serde_json::json!({
-                    "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
-                    "apiKey": doubao.api_key,
-                    "models": doubao_models
-                }));
+                providers.insert(
+                    "doubao".to_string(),
+                    serde_json::json!({
+                        "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+                        "apiKey": doubao.api_key,
+                        "models": doubao_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_DOUBAO_API_KEY", &doubao.api_key);
-                std::env::set_var("OPENCLAW_CHANNEL_DOUBAO_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3");
+                std::env::set_var(
+                    "OPENCLAW_CHANNEL_DOUBAO_BASE_URL",
+                    "https://ark.cn-beijing.volces.com/api/v3",
+                );
             }
         }
 
@@ -1225,18 +1316,22 @@ impl ConfigManager {
             if minimax.enabled && !minimax.api_key.is_empty() {
                 // 🔥 优先使用自定义模型
                 let minimax_models = if !minimax.custom_models.is_empty() {
-                    minimax.custom_models.iter().map(|m| {
-                        serde_json::json!({
-                            "id": m,
-                            "name": m,
-                            "api": "openai-completions"
+                    minimax
+                        .custom_models
+                        .iter()
+                        .map(|m| {
+                            serde_json::json!({
+                                "id": m,
+                                "name": m,
+                                "api": "anthropic-messages"
+                            })
                         })
-                    }).collect::<Vec<_>>()
+                        .collect::<Vec<_>>()
                 } else {
                     vec![
-                        serde_json::json!({"id": "abab6.5s-chat", "name": "abab6.5s-chat", "api": "openai-completions"}),
-                        serde_json::json!({"id": "abab6.5g-chat", "name": "abab6.5g-chat", "api": "openai-completions"}),
-                        serde_json::json!({"id": "abab6.5t-chat", "name": "abab6.5t-chat", "api": "openai-completions"}),
+                        serde_json::json!({"id": "MiniMax-M2.5", "name": "MiniMax-M2.5", "api": "anthropic-messages"}),
+                        serde_json::json!({"id": "MiniMax-M2.5-highspeed", "name": "MiniMax-M2.5-highspeed", "api": "anthropic-messages"}),
+                        serde_json::json!({"id": "MiniMax-M2.1", "name": "MiniMax-M2.1", "api": "anthropic-messages"}),
                     ]
                 };
 
@@ -1245,23 +1340,29 @@ impl ConfigManager {
                     models.insert(format!("minimax/{}", id), serde_json::json!({}));
                 }
                 let base_url = if minimax.base_url.is_empty() {
-                    "https://api.minimax.chat/v1"
+                    "https://api.minimaxi.com/anthropic"
                 } else {
                     &minimax.base_url
                 };
-                providers.insert("minimax".to_string(), serde_json::json!({
-                    "api": "openai-completions",
-                    "baseUrl": base_url,
-                    "apiKey": minimax.api_key,
-                    "models": minimax_models
-                }));
+                providers.insert(
+                    "minimax".to_string(),
+                    serde_json::json!({
+                        "api": "anthropic-messages",
+                        "authHeader": true,
+                        "baseUrl": base_url,
+                        "apiKey": minimax.api_key,
+                        "models": minimax_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_MINIMAX_API_KEY", &minimax.api_key);
                 std::env::set_var("OPENCLAW_CHANNEL_MINIMAX_BASE_URL", base_url);
             }
         }
 
         // OpenAI
-        if app_config.ai_provider.openai.enabled && !app_config.ai_provider.openai.api_key.is_empty() {
+        if app_config.ai_provider.openai.enabled
+            && !app_config.ai_provider.openai.api_key.is_empty()
+        {
             let openai_models = vec![
                 serde_json::json!({"id": "gpt-4o", "name": "gpt-4o"}),
                 serde_json::json!({"id": "gpt-4o-mini", "name": "gpt-4o-mini"}),
@@ -1272,13 +1373,22 @@ impl ConfigManager {
                 let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 models.insert(format!("openai/{}", id), serde_json::json!({}));
             }
-            providers.insert("openai".to_string(), serde_json::json!({
-                "baseUrl": app_config.ai_provider.openai.base_url,
-                "apiKey": app_config.ai_provider.openai.api_key,
-                "models": openai_models
-            }));
-            std::env::set_var("OPENCLAW_CHANNEL_OPENAI_API_KEY", &app_config.ai_provider.openai.api_key);
-            std::env::set_var("OPENCLAW_CHANNEL_OPENAI_BASE_URL", &app_config.ai_provider.openai.base_url);
+            providers.insert(
+                "openai".to_string(),
+                serde_json::json!({
+                    "baseUrl": app_config.ai_provider.openai.base_url,
+                    "apiKey": app_config.ai_provider.openai.api_key,
+                    "models": openai_models
+                }),
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_OPENAI_API_KEY",
+                &app_config.ai_provider.openai.api_key,
+            );
+            std::env::set_var(
+                "OPENCLAW_CHANNEL_OPENAI_BASE_URL",
+                &app_config.ai_provider.openai.base_url,
+            );
         }
 
         // Anthropic Claude
@@ -1294,11 +1404,14 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("anthropic/{}", id), serde_json::json!({}));
                 }
-                providers.insert("anthropic".to_string(), serde_json::json!({
-                    "baseUrl": anthropic.base_url,
-                    "apiKey": anthropic.api_key,
-                    "models": anthropic_models
-                }));
+                providers.insert(
+                    "anthropic".to_string(),
+                    serde_json::json!({
+                        "baseUrl": anthropic.base_url,
+                        "apiKey": anthropic.api_key,
+                        "models": anthropic_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_ANTHROPIC_API_KEY", &anthropic.api_key);
                 std::env::set_var("OPENCLAW_CHANNEL_ANTHROPIC_BASE_URL", &anthropic.base_url);
             }
@@ -1317,11 +1430,14 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("google/{}", id), serde_json::json!({}));
                 }
-                providers.insert("google".to_string(), serde_json::json!({
-                    "baseUrl": google.base_url,
-                    "apiKey": google.api_key,
-                    "models": google_models
-                }));
+                providers.insert(
+                    "google".to_string(),
+                    serde_json::json!({
+                        "baseUrl": google.base_url,
+                        "apiKey": google.api_key,
+                        "models": google_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_GOOGLE_API_KEY", &google.api_key);
                 std::env::set_var("OPENCLAW_CHANNEL_GOOGLE_BASE_URL", &google.base_url);
             }
@@ -1338,11 +1454,14 @@ impl ConfigManager {
                     let id = model.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     models.insert(format!("copilot/{}", id), serde_json::json!({}));
                 }
-                providers.insert("copilot".to_string(), serde_json::json!({
-                    "baseUrl": copilot.base_url,
-                    "apiKey": copilot.api_key,
-                    "models": copilot_models
-                }));
+                providers.insert(
+                    "copilot".to_string(),
+                    serde_json::json!({
+                        "baseUrl": copilot.base_url,
+                        "apiKey": copilot.api_key,
+                        "models": copilot_models
+                    }),
+                );
                 std::env::set_var("OPENCLAW_CHANNEL_COPILOT_API_KEY", &copilot.api_key);
                 std::env::set_var("OPENCLAW_CHANNEL_COPILOT_BASE_URL", &copilot.base_url);
             }
@@ -1370,7 +1489,10 @@ impl ConfigManager {
             }
             "deepseek" => {
                 if !app_config.ai_provider.deepseek.custom_models.is_empty() {
-                    format!("deepseek/{}", app_config.ai_provider.deepseek.custom_models[0])
+                    format!(
+                        "deepseek/{}",
+                        app_config.ai_provider.deepseek.custom_models[0]
+                    )
                 } else {
                     "deepseek/deepseek-chat".to_string()
                 }
@@ -1383,10 +1505,10 @@ impl ConfigManager {
                     if !minimax.custom_models.is_empty() {
                         format!("minimax/{}", minimax.custom_models[0])
                     } else {
-                        "minimax/abab6.5s-chat".to_string()
+                        "minimax/MiniMax-M2.5".to_string()
                     }
                 } else {
-                    "minimax/abab6.5s-chat".to_string()
+                    "minimax/MiniMax-M2.5".to_string()
                 }
             }
             "copilot" => "copilot/gpt-4o-copilot".to_string(),
@@ -1633,7 +1755,10 @@ impl AgentRegistry {
             AgentsRegistryConfig::default()
         };
 
-        Ok(Self { config_file, config })
+        Ok(Self {
+            config_file,
+            config,
+        })
     }
 
     /// 列出所有智能体
@@ -1793,9 +1918,9 @@ impl AgentRegistry {
                                 .lines()
                                 .find(|l| l.trim().starts_with("name:"))
                                 .and_then(|l| {
-                                    l.split(':')
-                                        .nth(1)
-                                        .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                                    l.split(':').nth(1).map(|s| {
+                                        s.trim().trim_matches('"').trim_matches('\'').to_string()
+                                    })
                                 })
                         } else {
                             None
@@ -1837,18 +1962,18 @@ impl AgentRegistry {
 pub fn get_default_embedding_model(provider: &str) -> Option<&'static str> {
     match provider {
         // 国内提供商
-        "qwen" => Some("text-embedding-v3"),           // 通义千问
-        "zhipu" => Some("embedding-3"),                // 智谱 GLM
-        "deepseek" => Some("deepseek-embed"),          // DeepSeek
-        "moonshot" => None,                            // 月之暗面（暂无嵌入模型）
-        "doubao" => None,                              // 豆包（需要单独配置）
-        "ernie" => None,                               // 文心一言（需要单独配置）
-        "minimax" => Some("embo-01"),                  // MiniMax
+        "qwen" => Some("text-embedding-v3"),  // 通义千问
+        "zhipu" => Some("embedding-3"),       // 智谱 GLM
+        "deepseek" => Some("deepseek-embed"), // DeepSeek
+        "moonshot" => None,                   // 月之暗面（暂无嵌入模型）
+        "doubao" => None,                     // 豆包（需要单独配置）
+        "ernie" => None,                      // 文心一言（需要单独配置）
+        "minimax" => Some("embo-01"),         // MiniMax
 
         // 国际提供商
-        "openai" => Some("text-embedding-3-small"),    // OpenAI
+        "openai" => Some("text-embedding-3-small"), // OpenAI
         "google" | "gemini" => Some("gemini-embedding-001"), // Google Gemini
-        "anthropic" => None,                           // Anthropic（暂无嵌入 API）
+        "anthropic" => None,                        // Anthropic（暂无嵌入 API）
 
         // 自定义
         "custom" => None,

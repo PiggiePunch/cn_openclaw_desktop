@@ -23,9 +23,7 @@ pub async fn check_for_updates(_app: &tauri::AppHandle) -> Result<Option<UpdateI
 }
 
 /// 下载并安装更新 - CN 版本已禁用
-pub async fn download_and_install_update(
-    _app: &tauri::AppHandle,
-) -> Result<(), String> {
+pub async fn download_and_install_update(_app: &tauri::AppHandle) -> Result<(), String> {
     Err("自动更新功能已在 CN 版本中禁用".to_string())
 }
 

@@ -3,7 +3,7 @@
 // 测试子 Agent 生成和管理的各种功能
 
 use openclaw_desktop::agents::subagent::{
-    SubAgentManager, SubAgentConfig, SubAgentId, SubAgentStatus, SubAgentStats,
+    SubAgentConfig, SubAgentId, SubAgentManager, SubAgentStats, SubAgentStatus,
 };
 
 fn create_test_config(name: &str, description: &str) -> SubAgentConfig {

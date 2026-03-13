@@ -29,8 +29,7 @@ use tray::TrayManager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 初始化日志
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let ctx = tauri::generate_context!();
 
@@ -58,31 +57,34 @@ pub fn run() {
             commands::install::check_openclaw_update,
             commands::install::update_openclaw,
             commands::install::get_openclaw_path,
-
             // ========== Gateway 进程管理（打包的 Node.js Gateway）==========
             commands::gateway_process::start_bundled_gateway,
             commands::gateway_process::stop_bundled_gateway,
             commands::gateway_process::bundled_gateway_status,
             commands::gateway_process::restart_bundled_gateway,
             commands::gateway_process::bundled_gateway_health_check,
-
             // ========== 配置管理 ==========
             commands::config::get_config,
             commands::config::set_config,
             commands::config::reset_config,
             commands::config::reset_all_data,
-
+            commands::config::save_openclaw_config,
+            commands::config::get_openclaw_config,
+            commands::config::resolve_gateway_auth_token,
+            commands::config::list_local_agents,
+            commands::config::load_local_agent_workspace,
+            commands::config::read_local_agent_workspace_file,
+            commands::config::save_local_agent_workspace_file,
             // ========== 权限管理 ==========
             commands::permissions::check_permission,
             commands::permissions::request_permission,
             commands::permissions::get_all_permissions,
             commands::permissions::refresh_permissions,
-
             // ========== 系统命令 ==========
             commands::system::get_system_info,
             commands::system::open_logs_folder,
             commands::system::open_url,
-
+            commands::system::test_model_connection,
             // ========== 自动更新 ==========
             commands::updater::check_for_updates,
             commands::updater::download_update,

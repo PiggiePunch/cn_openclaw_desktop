@@ -19,16 +19,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 /// 默认 Gateway 端口
 pub const DEFAULT_GATEWAY_PORT: u16 = 18789;
-
-/// Gateway 启动超时时间（秒）
-const GATEWAY_STARTUP_TIMEOUT_SECS: u64 = 30;
 
 /// WebSocket 连接重试次数
 const WS_CONNECT_RETRIES: u32 = 15;
@@ -51,7 +47,7 @@ pub struct GatewayProcessStatus {
     pub memory_mb: Option<f32>,
     /// WebSocket 是否可连接
     pub websocket_connected: bool,
-    /// 进程类型（"bundled" 表示打包的 Node.js）
+    /// 进程类型（managed/external）
     pub process_type: String,
     /// 错误信息
     pub error: Option<String>,
@@ -68,7 +64,7 @@ impl Default for GatewayProcessStatus {
             uptime_seconds: None,
             memory_mb: None,
             websocket_connected: false,
-            process_type: "bundled".to_string(),
+            process_type: "managed".to_string(),
             error: None,
             restart_count: 0,
         }
@@ -81,10 +77,25 @@ struct GatewayProcessHandle {
     child: tokio::process::Child,
     /// 启动时间
     start_time: Instant,
-    /// openclaw 路径
-    openclaw_path: PathBuf,
-    /// Node.js 运行时路径
-    node_path: PathBuf,
+}
+
+/// Gateway 进程状态
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayState {
+    /// 已停止
+    Stopped,
+    /// 启动中
+    Starting,
+    /// 运行中
+    Running,
+    /// 停止中
+    Stopping,
+}
+
+impl Default for GatewayState {
+    fn default() -> Self {
+        Self::Stopped
+    }
 }
 
 /// Gateway 进程管理器
@@ -94,6 +105,7 @@ struct GatewayProcessHandle {
 /// - 启动/停止/重启进程
 /// - 健康检查和自动恢复
 /// - 端口冲突处理
+/// - 并发启动保护（使用互斥锁）
 pub struct GatewayProcessManager {
     /// 进程句柄（可选）
     process: Arc<Mutex<Option<GatewayProcessHandle>>>,
@@ -103,6 +115,10 @@ pub struct GatewayProcessManager {
     restart_count: Arc<Mutex<u32>>,
     /// 最大自动重启次数
     max_restart_count: u32,
+    /// 当前状态
+    state: Arc<Mutex<GatewayState>>,
+    /// 启动互斥锁（防止并发启动）
+    starting_lock: Arc<Mutex<()>>,
 }
 
 impl GatewayProcessManager {
@@ -119,6 +135,8 @@ impl GatewayProcessManager {
             port: port.unwrap_or(DEFAULT_GATEWAY_PORT),
             restart_count: Arc::new(Mutex::new(0)),
             max_restart_count: 3,
+            state: Arc::new(Mutex::new(GatewayState::default())),
+            starting_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -130,38 +148,85 @@ impl GatewayProcessManager {
     /// 启动 Gateway 进程
     ///
     /// 启动流程：
-    /// 1. 检查是否已在运行
-    /// 2. 检查并清理端口占用
-    /// 3. 查找 openclaw 可执行文件
-    /// 4. 查找 Node.js 运行时
+    /// 1. 获取启动锁（防止并发启动）
+    /// 2. 检查是否已在运行（包含外部 Gateway）
+    /// 3. 仅在必要时启动受管 Gateway，且不清理外部占用进程
+    /// 4. 查找 openclaw 可执行路径（优先系统安装，其次自动安装目录）
     /// 5. 启动子进程
     /// 6. 等待 WebSocket 就绪
     /// 7. 保存进程句柄
     pub async fn start(&self) -> Result<GatewayProcessStatus> {
         log::info!("🚀 启动 Gateway 进程...");
 
-        // 1. 检查是否已在运行
+        // 1. 获取启动锁，防止并发启动
+        let _lock = self.starting_lock.lock().await;
+
+        // 检查当前状态
+        {
+            let state = self.state.lock().await;
+            if *state == GatewayState::Starting {
+                log::info!("⏳ Gateway 正在启动中，跳过重复请求");
+                return self.get_status().await;
+            }
+        }
+
+        // 2. 双重检查是否已在运行
         if self.is_running().await? {
             log::info!("✅ Gateway 已在运行");
             return self.get_status().await;
         }
 
-        // 2. 检查并清理端口占用
-        if let Err(e) = self.check_and_clear_port().await {
-            log::warn!("⚠️ 端口检查警告: {}", e);
+        // 2.5 优先复用外部 Gateway（例如 launchctl 守护进程）
+        if let Some(status) = self.detect_external_gateway_status().await {
+            log::info!("✅ 检测到外部 Gateway 正在运行，直接复用");
+            return Ok(status);
         }
 
-        // 3. 查找 openclaw 可执行文件
+        // 3. 标记启动中状态
+        *self.state.lock().await = GatewayState::Starting;
+
+        // 4. 执行启动逻辑
+        let result = self.do_start().await;
+
+        // 5. 根据结果更新状态
+        match &result {
+            Ok(_) => {
+                *self.state.lock().await = GatewayState::Running;
+            }
+            Err(_) => {
+                *self.state.lock().await = GatewayState::Stopped;
+            }
+        }
+
+        result
+    }
+
+    /// 实际的启动逻辑（内部方法）
+    async fn do_start(&self) -> Result<GatewayProcessStatus> {
+        // 1. 检查端口可用性（不再强杀外部进程）
+        self.ensure_port_available().await?;
+
+        // 2. 查找 openclaw 可执行文件
         let openclaw_path = self.find_openclaw_path()?;
         log::info!("📁 OpenClaw 路径: {:?}", openclaw_path);
 
-        // 4. 查找 Node.js 运行时
-        let node_path = self.find_node_path()?;
-        log::info!("📦 Node.js 路径: {:?}", node_path);
+        // 3. 构建启动命令
+        let is_mjs_entry = openclaw_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("mjs"))
+            .unwrap_or(false);
 
-        // 5. 构建启动命令
-        let mut cmd = TokioCommand::new(&node_path);
-        cmd.arg(&openclaw_path);
+        let mut cmd = if is_mjs_entry {
+            let node_path = self.find_node_path()?;
+            log::info!("📦 Node.js 路径: {:?}", node_path);
+            let mut c = TokioCommand::new(&node_path);
+            c.arg(&openclaw_path);
+            c
+        } else {
+            TokioCommand::new(&openclaw_path)
+        };
+
         cmd.args(["gateway", "run"]);
         cmd.args(["--port", &self.port.to_string()]);
         cmd.args(["--bind", "loopback"]);
@@ -170,23 +235,29 @@ impl GatewayProcessManager {
         // 设置环境变量
         self.setup_environment(&mut cmd);
 
-        // 设置工作目录
-        if let Some(work_dir) = openclaw_path.parent().and_then(|p| p.parent()) {
-            if work_dir.join("package.json").exists() {
-                cmd.current_dir(work_dir);
-                log::info!("📂 工作目录: {:?}", work_dir);
+        // mjs 模式下设置工作目录
+        if is_mjs_entry {
+            if let Some(work_dir) = openclaw_path.parent().and_then(|p| p.parent()) {
+                if work_dir.join("package.json").exists() {
+                    cmd.current_dir(work_dir);
+                    log::info!("📂 工作目录: {:?}", work_dir);
+                }
             }
         }
 
-        // 6. 启动进程
-        log::info!("🔧 启动命令: node {:?} gateway run --port {}", openclaw_path, self.port);
-        let mut child = cmd.spawn()
-            .map_err(|e| anyhow!("启动 Gateway 失败: {}\n请确保 openclaw 和 Node.js 已正确安装", e))?;
+        // 4. 启动进程
+        log::info!("🔧 启动命令: {:?} gateway run --port {}", openclaw_path, self.port);
+        let mut child = cmd.spawn().map_err(|e| {
+            anyhow!(
+                "启动 Gateway 失败: {}\n请确保已安装 openclaw CLI（未安装时可通过应用自动安装）",
+                e
+            )
+        })?;
 
         let pid = child.id();
         log::info!("✅ Gateway 进程已启动 (PID: {:?})", pid);
 
-        // 7. 等待 WebSocket 就绪
+        // 5. 等待 WebSocket 就绪
         log::info!("⏳ 等待 WebSocket 服务器启动...");
         let ws_connected = self.wait_for_websocket().await?;
 
@@ -201,12 +272,10 @@ impl GatewayProcessManager {
 
         log::info!("✅ WebSocket 连接成功");
 
-        // 8. 保存进程句柄
+        // 6. 保存进程句柄
         let handle = GatewayProcessHandle {
             child,
             start_time: Instant::now(),
-            openclaw_path,
-            node_path,
         };
         *self.process.lock().await = Some(handle);
 
@@ -260,6 +329,10 @@ impl GatewayProcessManager {
         let guard = self.process.lock().await;
 
         if guard.is_none() {
+            drop(guard);
+            if let Some(status) = self.detect_external_gateway_status().await {
+                return Ok(status);
+            }
             return Ok(GatewayProcessStatus::default());
         }
 
@@ -286,7 +359,7 @@ impl GatewayProcessManager {
             uptime_seconds: uptime,
             memory_mb,
             websocket_connected: ws_connected,
-            process_type: "bundled".to_string(),
+            process_type: "managed".to_string(),
             error: None,
             restart_count,
         })
@@ -300,7 +373,8 @@ impl GatewayProcessManager {
             // 检查 PID 是否存在
             Ok(handle.child.id().is_some())
         } else {
-            Ok(false)
+            drop(guard);
+            Ok(self.detect_external_gateway_status().await.is_some())
         }
     }
 
@@ -327,51 +401,10 @@ impl GatewayProcessManager {
     /// 查找 openclaw 可执行文件路径
     ///
     /// 查找顺序：
-    /// 1. 打包的资源目录 (resources/openclaw/)
+    /// 1. 系统安装的 openclaw 命令（推荐）
     /// 2. 自动安装目录 (~/.openclaw/core/)
-    /// 3. 开发环境 (../openclaw/)
-    /// 4. 全局安装 (which/where)
     fn find_openclaw_path(&self) -> Result<PathBuf> {
-        // 获取当前可执行文件目录
-        let exe_path = std::env::current_exe()
-            .map_err(|e| anyhow!("无法获取当前可执行文件路径: {}", e))?;
-        let exe_dir = exe_path.parent()
-            .ok_or_else(|| anyhow!("无法获取可执行文件目录"))?;
-
-        // 资源搜索路径列表
-        let search_paths = vec![
-            // 🔥 优先级 1：打包的资源目录
-            // macOS: .app/Contents/MacOS/resources/openclaw/openclaw.mjs
-            exe_dir.join("resources/openclaw/openclaw.mjs"),
-            // macOS: .app/Contents/Resources/openclaw/openclaw.mjs
-            exe_dir.join("../Resources/openclaw/openclaw.mjs"),
-            // 通用: resources/openclaw/openclaw.mjs
-            exe_dir.join("../resources/openclaw/openclaw.mjs"),
-            // 开发环境
-            exe_dir.join("../../../resources/openclaw/openclaw.mjs"),
-
-            // 🔥 优先级 2：自动安装目录
-            dirs::home_dir()
-                .map(|h| h.join(".openclaw/core/openclaw.mjs"))
-                .unwrap_or_default(),
-            dirs::home_dir()
-                .map(|h| h.join(".openclaw/core/dist/openclaw.mjs"))
-                .unwrap_or_default(),
-
-            // 🔥 优先级 3：开发环境（openclaw 和 openclaw-desktop 同级）
-            exe_dir.join("../../../openclaw/openclaw.mjs"),
-            exe_dir.join("../../../openclaw/dist/openclaw.mjs"),
-        ];
-
-        for path in search_paths {
-            if path.exists() {
-                let canonical = path.canonicalize().unwrap_or(path.clone());
-                log::debug!("找到 openclaw: {:?}", canonical);
-                return Ok(canonical);
-            }
-        }
-
-        // 🔥 优先级 4：全局安装
+        // 优先系统安装
         #[cfg(unix)]
         {
             if let Ok(output) = StdCommand::new("which").arg("openclaw").output() {
@@ -379,7 +412,7 @@ impl GatewayProcessManager {
                     let path_str = String::from_utf8_lossy(&output.stdout);
                     let path = path_str.trim();
                     if !path.is_empty() {
-                        return Ok(PathBuf::from(path));
+                        return Ok(PathBuf::from(path).canonicalize().unwrap_or(PathBuf::from(path)));
                     }
                 }
             }
@@ -392,55 +425,47 @@ impl GatewayProcessManager {
                     let path_str = String::from_utf8_lossy(&output.stdout);
                     if let Some(path) = path_str.lines().next() {
                         if !path.is_empty() {
-                            return Ok(PathBuf::from(path.trim()));
+                            return Ok(
+                                PathBuf::from(path.trim())
+                                    .canonicalize()
+                                    .unwrap_or(PathBuf::from(path.trim())),
+                            );
                         }
                     }
                 }
             }
         }
 
+        // 自动安装目录（应用按需安装的 core）
+        let fallback_paths = vec![
+            dirs::home_dir()
+                .map(|h| h.join(".openclaw/core/openclaw.mjs"))
+                .unwrap_or_default(),
+            dirs::home_dir()
+                .map(|h| h.join(".openclaw/core/dist/openclaw.mjs"))
+                .unwrap_or_default(),
+        ];
+
+        for path in fallback_paths {
+            if path.exists() {
+                let canonical = path.canonicalize().unwrap_or(path.clone());
+                log::info!("使用自动安装的 OpenClaw core: {:?}", canonical);
+                return Ok(canonical);
+            }
+        }
+
         Err(anyhow!(
             "找不到 openclaw 可执行文件。\n\
              请确保：\n\
-             1. 已运行打包脚本将 openclaw 打包到 resources/openclaw/\n\
-             2. 或已全局安装 openclaw\n\
-             3. 或将 openclaw 项目放在 openclaw-desktop 同级目录"
+             1. 已全局安装 openclaw（推荐）\n\
+             2. 或通过应用自动安装 OpenClaw core"
         ))
     }
 
     /// 查找 Node.js 运行时路径
     ///
-    /// 查找顺序：
-    /// 1. 打包的 Node.js (resources/openclaw/node/)
-    /// 2. 系统 Node.js
+    /// 仅使用系统 Node.js（不再依赖应用内置 Node 资源）
     fn find_node_path(&self) -> Result<PathBuf> {
-        // 获取当前可执行文件目录
-        let exe_path = std::env::current_exe()
-            .map_err(|e| anyhow!("无法获取当前可执行文件路径: {}", e))?;
-        let exe_dir = exe_path.parent()
-            .ok_or_else(|| anyhow!("无法获取可执行文件目录"))?;
-
-        // 平台特定的 Node.js 可执行文件名
-        #[cfg(unix)]
-        let node_bin = "node";
-        #[cfg(windows)]
-        let node_bin = "node.exe";
-
-        // 打包的 Node.js 路径
-        let bundled_paths = vec![
-            exe_dir.join("resources/openclaw/node").join(node_bin),
-            exe_dir.join("../Resources/openclaw/node").join(node_bin),
-            exe_dir.join("../resources/openclaw/node").join(node_bin),
-        ];
-
-        for path in bundled_paths {
-            if path.exists() {
-                let canonical = path.canonicalize().unwrap_or(path.clone());
-                log::info!("使用打包的 Node.js: {:?}", canonical);
-                return Ok(canonical);
-            }
-        }
-
         // 使用系统 Node.js
         #[cfg(unix)]
         {
@@ -450,7 +475,7 @@ impl GatewayProcessManager {
                     let path = path_str.trim();
                     if !path.is_empty() {
                         log::info!("使用系统 Node.js: {}", path);
-                        return Ok(PathBuf::from(path));
+                        return Ok(PathBuf::from(path).canonicalize().unwrap_or(PathBuf::from(path)));
                     }
                 }
             }
@@ -464,29 +489,24 @@ impl GatewayProcessManager {
                     if let Some(path) = path_str.lines().next() {
                         if !path.is_empty() {
                             log::info!("使用系统 Node.js: {}", path.trim());
-                            return Ok(PathBuf::from(path.trim()));
+                            return Ok(
+                                PathBuf::from(path.trim())
+                                    .canonicalize()
+                                    .unwrap_or(PathBuf::from(path.trim())),
+                            );
                         }
                     }
                 }
             }
         }
 
-        Err(anyhow!(
-            "找不到 Node.js 运行时。\n\
-             请确保：\n\
-             1. 已将 Node.js 打包到 resources/openclaw/node/\n\
-             2. 或已安装 Node.js 并添加到 PATH"
-        ))
+        Err(anyhow!("找不到 Node.js 运行时，请先安装 Node.js 并确保在 PATH 中可见"))
     }
 
     /// 设置环境变量
     fn setup_environment(&self, cmd: &mut TokioCommand) {
-        // 设置 OpenClaw 配置目录
-        let config_dir = crate::paths::data_dir();
-        cmd.env("OPENCLAW_CONFIG_DIR", &config_dir);
-        log::info!("🔧 OPENCLAW_CONFIG_DIR: {:?}", config_dir);
-
         // 尝试加载应用的 API Keys（如果配置管理器可用）
+        // 注意：不再覆写 OPENCLAW_CONFIG_DIR，直接复用用户原生 ~/.openclaw 配置
         if let Ok(config_mgr) = crate::config::ConfigManager::new() {
             if let Ok(config) = config_mgr.load() {
                 // 通义千问
@@ -500,62 +520,73 @@ impl GatewayProcessManager {
                     }
                 }
                 // DeepSeek
-                if config.ai_provider.deepseek.enabled && !config.ai_provider.deepseek.api_key.is_empty() {
+                if config.ai_provider.deepseek.enabled
+                    && !config.ai_provider.deepseek.api_key.is_empty()
+                {
                     cmd.env("DEEPSEEK_API_KEY", &config.ai_provider.deepseek.api_key);
                 }
             }
         }
     }
 
-    /// 检查并清理端口占用
-    async fn check_and_clear_port(&self) -> Result<()> {
+    /// 探测是否已有外部 Gateway 在运行（不属于本进程管理器）
+    async fn detect_external_gateway_status(&self) -> Option<GatewayProcessStatus> {
+        if !self.check_websocket_connection().await {
+            return None;
+        }
+
+        let restart_count = *self.restart_count.lock().await;
+        let pid = self.find_port_owner_pid().await;
+
+        Some(GatewayProcessStatus {
+            running: true,
+            pid,
+            port: self.port,
+            uptime_seconds: None,
+            memory_mb: None,
+            websocket_connected: true,
+            process_type: "external".to_string(),
+            error: None,
+            restart_count,
+        })
+    }
+
+    /// 查找端口占用进程 PID（Unix）
+    async fn find_port_owner_pid(&self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            if let Ok(output) = StdCommand::new("lsof")
+                .args(["-ti", &format!(":{}", self.port)])
+                .output()
+            {
+                let pids = String::from_utf8_lossy(&output.stdout);
+                for line in pids.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// 检查端口可用性（禁止误杀已有进程）
+    async fn ensure_port_available(&self) -> Result<()> {
         let addr = format!("127.0.0.1:{}", self.port);
 
         match tokio::net::TcpStream::connect(&addr).await {
             Ok(_) => {
-                log::warn!("⚠️ 端口 {} 被占用，尝试清理...", self.port);
-
-                #[cfg(unix)]
-                {
-                    let current_pid = std::process::id();
-
-                    // 使用 lsof 查找占用端口的进程
-                    if let Ok(output) = StdCommand::new("lsof")
-                        .args(["-ti", &format!(":{}", self.port)])
-                        .output()
-                    {
-                        let pids = String::from_utf8_lossy(&output.stdout);
-                        for pid_str in pids.lines() {
-                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                                if pid == current_pid {
-                                    continue;
-                                }
-                                log::info!("🔧 终止占用端口的进程 (PID: {})", pid);
-                                let _ = StdCommand::new("kill")
-                                    .args(["-9", &pid.to_string()])
-                                    .output();
-                            }
-                        }
-                    }
-
-                    // 等待端口释放
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-
-                    // 再次检查
-                    if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                        return Err(anyhow!("端口 {} 仍被占用，请手动清理", self.port));
-                    }
-
-                    log::info!("✅ 端口 {} 已清理", self.port);
-                }
-
-                #[cfg(windows)]
-                {
-                    // Windows 端口清理待实现
-                    return Err(anyhow!("端口 {} 被占用，请手动清理", self.port));
-                }
-
-                Ok(())
+                let pid_desc = self
+                    .find_port_owner_pid()
+                    .await
+                    .map(|pid| format!(" (PID: {})", pid))
+                    .unwrap_or_default();
+                Err(anyhow!(
+                    "端口 {} 已被占用{}，并且不是由桌面进程托管。请先停止该服务或复用它。",
+                    self.port,
+                    pid_desc
+                ))
             }
             Err(_) => Ok(()),
         }
@@ -564,9 +595,12 @@ impl GatewayProcessManager {
     /// 等待 WebSocket 就绪
     async fn wait_for_websocket(&self) -> Result<bool> {
         for attempt in 1..=WS_CONNECT_RETRIES {
-            tokio::time::sleep(Duration::from_millis(
-                if attempt == 1 { 3000 } else { WS_CONNECT_RETRY_INTERVAL_MS }
-            )).await;
+            tokio::time::sleep(Duration::from_millis(if attempt == 1 {
+                3000
+            } else {
+                WS_CONNECT_RETRY_INTERVAL_MS
+            }))
+            .await;
 
             log::debug!("🔍 WebSocket 连接尝试 {}...", attempt);
 
@@ -582,38 +616,10 @@ impl GatewayProcessManager {
     async fn check_websocket_connection(&self) -> bool {
         let addr = format!("127.0.0.1:{}", self.port);
 
-        match tokio::net::TcpStream::connect(&addr).await {
-            Ok(mut stream) => {
-                // 发送 WebSocket 握手请求
-                let handshake = format!(
-                    "GET / HTTP/1.1\r\n\
-                     Host: 127.0.0.1:{}\r\n\
-                     Upgrade: websocket\r\n\
-                     Connection: Upgrade\r\n\
-                     Sec-WebSocket-Version: 13\r\n\
-                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-                    self.port
-                );
-
-                if stream.write_all(handshake.as_bytes()).await.is_err() {
-                    return false;
-                }
-
-                // 等待响应
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                // 读取响应
-                let mut buffer = [0u8; 2048];
-                match timeout(Duration::from_secs(3), stream.read(&mut buffer)).await {
-                    Ok(Ok(n)) if n > 0 => {
-                        let response = String::from_utf8_lossy(&buffer[..n]);
-                        response.contains("101") || response.contains("Switching Protocols")
-                    }
-                    _ => false,
-                }
-            }
-            Err(_) => false,
-        }
+        matches!(
+            timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(&addr)).await,
+            Ok(Ok(_))
+        )
     }
 
     /// 获取进程内存使用量
@@ -650,6 +656,8 @@ impl Clone for GatewayProcessManager {
             port: self.port,
             restart_count: Arc::clone(&self.restart_count),
             max_restart_count: self.max_restart_count,
+            state: Arc::clone(&self.state),
+            starting_lock: Arc::clone(&self.starting_lock),
         }
     }
 }

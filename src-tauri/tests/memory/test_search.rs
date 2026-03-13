@@ -1,10 +1,13 @@
 // src-tauri/tests/memory/test_search.rs
 // 搜索引擎测试
 
+use openclaw_desktop::memory::embedding::EmbeddingClient;
 use openclaw_desktop::memory::search::SearchEngine;
 use openclaw_desktop::memory::store::MemoryStore;
-use openclaw_desktop::memory::embedding::EmbeddingClient;
-use openclaw_desktop::memory::types::{MemoryChunk, MemoryEntry, Metadata, MemorySource, ChunkMetadata, SearchOptionsCompat as SearchOptions, EmbeddingConfig};
+use openclaw_desktop::memory::types::{
+    ChunkMetadata, EmbeddingConfig, MemoryChunk, MemoryEntry, MemorySource, Metadata,
+    SearchOptionsCompat as SearchOptions,
+};
 use uuid::Uuid;
 
 /// 创建测试搜索引擎
@@ -43,7 +46,10 @@ fn test_extract_snippet() {
     // 测试长文本（需要截断）
     let long_text = "a".repeat(300);
     let snippet = engine.extract_snippet(&long_text, 100);
-    assert!(snippet.len() <= 103, "截断后的文本应不超过 103 字符（100 + '...'）");
+    assert!(
+        snippet.len() <= 103,
+        "截断后的文本应不超过 103 字符（100 + '...'）"
+    );
     assert!(snippet.ends_with("..."), "截断后的文本应以 '...' 结尾");
 }
 
@@ -55,7 +61,10 @@ fn test_extract_snippet_exact_length() {
     let exact_text = "a".repeat(100);
     let snippet = engine.extract_snippet(&exact_text, 100);
     assert_eq!(snippet.len(), 100, "恰好等于最大长度的文本不应被截断");
-    assert!(!snippet.ends_with("..."), "恰好等于最大长度的文本不应添加 '...'");
+    assert!(
+        !snippet.ends_with("..."),
+        "恰好等于最大长度的文本不应添加 '...'"
+    );
 }
 
 #[test]

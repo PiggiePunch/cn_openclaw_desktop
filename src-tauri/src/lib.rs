@@ -61,7 +61,7 @@ pub mod commands;
 // 重新导出常用类型（方便使用）
 // ============================================
 
-pub use openclaw_manager::{OpenClawManager, InstallStatus};
 pub use config::*;
-pub use wechat::*;
+pub use openclaw_manager::{InstallStatus, OpenClawManager};
 pub use permissions::*;
+pub use wechat::*;

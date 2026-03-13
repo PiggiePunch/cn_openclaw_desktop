@@ -3,12 +3,12 @@
 // P1-3: 微信监控功能
 // 通过 macOS Accessibility API 监听微信消息并支持自动回复
 
-use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
-use std::time::{Duration, Instant};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 // 导入内部模块
 // TODO: Phase 3c - infra 和 auto_reply 模块已删除，需要重新设计这些功能
@@ -271,7 +271,11 @@ mod accessibility {
         pub fn CFRelease(cf: *const c_void);
 
         // AXObserver API
-        pub fn AXObserverCreate(pid: i32, callback: extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void), observer: *mut *mut c_void) -> i32;
+        pub fn AXObserverCreate(
+            pid: i32,
+            callback: extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void),
+            observer: *mut *mut c_void,
+        ) -> i32;
         pub fn AXObserverAddNotification(
             observer: *mut c_void,
             element: *mut c_void,
@@ -295,55 +299,51 @@ mod accessibility {
     extern "C" {
         pub fn CFStringGetLength(cf_string: *const c_void) -> usize;
         pub fn CFStringGetMaximumSizeForEncoding(length: usize, encoding: u32) -> usize;
-        pub fn CFStringGetCString(cf_string: *const c_void, buffer: *mut c_char, bufferSize: usize, encoding: u32) -> bool;
+        pub fn CFStringGetCString(
+            cf_string: *const c_void,
+            buffer: *mut c_char,
+            bufferSize: usize,
+            encoding: u32,
+        ) -> bool;
         pub fn CFArrayGetCount(array: *const c_void) -> usize;
         pub fn CFArrayGetValueAtIndex(array: *const c_void, index: usize) -> *const c_void;
         pub fn CFBooleanGetValue(cf_boolean: *const c_void) -> bool;
-        pub fn CFNumberGetValue(number: *const c_void, theType: u32, valuePtr: *mut c_void) -> bool;
+        pub fn CFNumberGetValue(number: *const c_void, theType: u32, valuePtr: *mut c_void)
+            -> bool;
     }
 
     // 常量
     pub const K_CF_STRING_ENCODING_UTF8: u32 = 0x08000100;
 
     // AX Attribute 名称
-    pub static AX_TITLE: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXTitle").unwrap()
-    });
-    pub static AX_VALUE: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXValue").unwrap()
-    });
-    pub static AX_DESCRIPTION: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXDescription").unwrap()
-    });
-    pub static AX_CHILDREN: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXChildren").unwrap()
-    });
-    pub static AX_ROLE: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXRole").unwrap()
-    });
-    pub static AX_SUBROLE: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXSubrole").unwrap()
-    });
-    pub static AX_IDENTIFIER: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXIdentifier").unwrap()
-    });
-    pub static AX_HELP: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXHelp").unwrap()
-    });
+    pub static AX_TITLE: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXTitle").unwrap());
+    pub static AX_VALUE: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXValue").unwrap());
+    pub static AX_DESCRIPTION: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXDescription").unwrap());
+    pub static AX_CHILDREN: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXChildren").unwrap());
+    pub static AX_ROLE: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXRole").unwrap());
+    pub static AX_SUBROLE: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXSubrole").unwrap());
+    pub static AX_IDENTIFIER: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXIdentifier").unwrap());
+    pub static AX_HELP: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXHelp").unwrap());
 
     // AX Notification 名称
-    pub static AX_VALUE_CHANGED_NOTIFICATION: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXValueChangedNotification").unwrap()
-    });
-    pub static AX_UI_ELEMENT_DESTROYED_NOTIFICATION: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXUIElementDestroyedNotification").unwrap()
-    });
-    pub static AX_WINDOW_CREATED_NOTIFICATION: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXWindowCreatedNotification").unwrap()
-    });
-    pub static AX_FOCUSED_UI_ELEMENT_CHANGED_NOTIFICATION: once_cell::sync::Lazy<CString> = once_cell::sync::Lazy::new(|| {
-        CString::new("AXFocusedUIElementChangedNotification").unwrap()
-    });
+    pub static AX_VALUE_CHANGED_NOTIFICATION: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXValueChangedNotification").unwrap());
+    pub static AX_UI_ELEMENT_DESTROYED_NOTIFICATION: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXUIElementDestroyedNotification").unwrap());
+    pub static AX_WINDOW_CREATED_NOTIFICATION: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| CString::new("AXWindowCreatedNotification").unwrap());
+    pub static AX_FOCUSED_UI_ELEMENT_CHANGED_NOTIFICATION: once_cell::sync::Lazy<CString> =
+        once_cell::sync::Lazy::new(|| {
+            CString::new("AXFocusedUIElementChangedNotification").unwrap()
+        });
 
     /// 检查辅助功能权限
     pub fn check_permission() -> bool {
@@ -365,8 +365,16 @@ mod accessibility {
             }
 
             let mut buffer = vec![0i8; max_size + 1];
-            if CFStringGetCString(cf_string, buffer.as_mut_ptr(), max_size + 1, K_CF_STRING_ENCODING_UTF8) {
-                CStr::from_ptr(buffer.as_ptr()).to_str().ok().map(|s| s.to_string())
+            if CFStringGetCString(
+                cf_string,
+                buffer.as_mut_ptr(),
+                max_size + 1,
+                K_CF_STRING_ENCODING_UTF8,
+            ) {
+                CStr::from_ptr(buffer.as_ptr())
+                    .to_str()
+                    .ok()
+                    .map(|s| s.to_string())
             } else {
                 None
             }
@@ -380,9 +388,8 @@ mod accessibility {
         }
 
         let mut value: *mut c_void = std::ptr::null_mut();
-        let result = unsafe {
-            AXUIElementCopyAttributeValue(element, attribute.as_ptr(), &mut value)
-        };
+        let result =
+            unsafe { AXUIElementCopyAttributeValue(element, attribute.as_ptr(), &mut value) };
 
         if result == 0 && !value.is_null() {
             Some(value)
@@ -513,7 +520,11 @@ impl MessageParser {
         if let Some(pos) = colon_pos {
             let sender = raw[..pos].trim().to_string();
             // 根据实际找到的冒号类型确定跳过的字节数
-            let colon_len = if raw.as_bytes().get(pos) == Some(&b':') { 1 } else { 3 }; // ASCII冒号1字节，中文冒号3字节
+            let colon_len = if raw.as_bytes().get(pos) == Some(&b':') {
+                1
+            } else {
+                3
+            }; // ASCII冒号1字节，中文冒号3字节
             let content = raw[pos + colon_len..].trim().to_string();
 
             // 过滤无效发送者
@@ -538,11 +549,16 @@ impl MessageParser {
         }
 
         // 文件
-        if lower.contains("[文件]") || lower.contains("[file]") ||
-           lower.ends_with(".pdf") || lower.ends_with(".doc") ||
-           lower.ends_with(".docx") || lower.ends_with(".xls") ||
-           lower.ends_with(".xlsx") || lower.ends_with(".zip") ||
-           lower.ends_with(".rar") {
+        if lower.contains("[文件]")
+            || lower.contains("[file]")
+            || lower.ends_with(".pdf")
+            || lower.ends_with(".doc")
+            || lower.ends_with(".docx")
+            || lower.ends_with(".xls")
+            || lower.ends_with(".xlsx")
+            || lower.ends_with(".zip")
+            || lower.ends_with(".rar")
+        {
             return MessageType::File;
         }
 
@@ -557,8 +573,11 @@ impl MessageParser {
         }
 
         // 链接
-        if lower.contains("http://") || lower.contains("https://") ||
-           lower.contains("www.") || lower.contains("[链接]") {
+        if lower.contains("http://")
+            || lower.contains("https://")
+            || lower.contains("www.")
+            || lower.contains("[链接]")
+        {
             return MessageType::Link;
         }
 
@@ -573,8 +592,10 @@ impl MessageParser {
         }
 
         // 表情
-        if lower.starts_with('[') && lower.ends_with(']') &&
-           (lower.contains("表情") || lower.contains("sticker")) {
+        if lower.starts_with('[')
+            && lower.ends_with(']')
+            && (lower.contains("表情") || lower.contains("sticker"))
+        {
             return MessageType::Sticker;
         }
 
@@ -584,8 +605,11 @@ impl MessageParser {
         }
 
         // 系统消息
-        if lower.contains("撤回了一条消息") || lower.contains("recall") ||
-           lower.contains("邀请了") || lower.contains("修改群名为") {
+        if lower.contains("撤回了一条消息")
+            || lower.contains("recall")
+            || lower.contains("邀请了")
+            || lower.contains("修改群名为")
+        {
             return MessageType::System;
         }
 
@@ -649,7 +673,13 @@ impl MessageParser {
             }
             hash
         };
-        format!("{}:{}:{:016x}:{}", chat_name, sender, content_hash, chrono::Utc::now().timestamp() / 60)
+        format!(
+            "{}:{}:{:016x}:{}",
+            chat_name,
+            sender,
+            content_hash,
+            chrono::Utc::now().timestamp() / 60
+        )
     }
 
     /// 定期清理过期记录
@@ -837,7 +867,10 @@ impl WeChatMonitor {
                     last_message_time: None,
                     wechat_running: false,
                     permission_granted: false,
-                    error: Some("需要辅助功能权限，请在系统设置 > 隐私与安全性 > 辅助功能中授权".to_string()),
+                    error: Some(
+                        "需要辅助功能权限，请在系统设置 > 隐私与安全性 > 辅助功能中授权"
+                            .to_string(),
+                    ),
                     connection_status: ConnectionStatus::Error,
                     error_count: 0,
                     reconnect_count: 0,
@@ -915,7 +948,8 @@ impl WeChatMonitor {
                         stop_rx,
                         parser,
                         state,
-                    ).await;
+                    )
+                    .await;
                 });
             }
 
@@ -970,7 +1004,8 @@ impl WeChatMonitor {
                 &mut stop_rx,
                 &parser,
                 &state,
-            ).await;
+            )
+            .await;
 
             match result {
                 Ok(should_stop) => {
@@ -996,7 +1031,9 @@ impl WeChatMonitor {
             }
 
             // 检查重连限制
-            if config.max_reconnect_attempts > 0 && reconnect_attempts >= config.max_reconnect_attempts {
+            if config.max_reconnect_attempts > 0
+                && reconnect_attempts >= config.max_reconnect_attempts
+            {
                 log::error!("[WeChat] 达到最大重连次数 {}，停止监控", reconnect_attempts);
                 {
                     let mut s = state.write().await;
@@ -1014,8 +1051,11 @@ impl WeChatMonitor {
                 s.reconnect_count += 1;
             }
 
-            log::info!("[WeChat] 等待 {}ms 后尝试重连 (第 {} 次)...",
-                config.reconnect_interval_ms, reconnect_attempts);
+            log::info!(
+                "[WeChat] 等待 {}ms 后尝试重连 (第 {} 次)...",
+                config.reconnect_interval_ms,
+                reconnect_attempts
+            );
 
             // 等待重连间隔
             tokio::select! {
@@ -1066,7 +1106,8 @@ impl WeChatMonitor {
         }
 
         // 记录上一次的消息内容（用于检测新消息）
-        let mut last_messages: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut last_messages: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         log::info!("[WeChat] 监控会话已启动");
 
@@ -1141,7 +1182,14 @@ impl WeChatMonitor {
             }
 
             // 在窗口中查找消息列表
-            Self::find_messages_in_element(window, &chat_name, config, messages, last_messages, parser);
+            Self::find_messages_in_element(
+                window,
+                &chat_name,
+                config,
+                messages,
+                last_messages,
+                parser,
+            );
         }
 
         Ok(())
@@ -1227,16 +1275,10 @@ impl WeChatMonitor {
                         let event_text = if message.is_group {
                             format!(
                                 "微信群消息 [{}] {}: {}",
-                                message.chat_name,
-                                message.sender,
-                                message.content
+                                message.chat_name, message.sender, message.content
                             )
                         } else {
-                            format!(
-                                "微信消息 [{}] {}",
-                                message.sender,
-                                message.content
-                            )
+                            format!("微信消息 [{}] {}", message.sender, message.content)
                         };
 
                         // TODO: Phase 3c - system_events 模块已删除，需要重新设计
@@ -1267,7 +1309,14 @@ impl WeChatMonitor {
         // 递归搜索子元素
         let children = get_children(element);
         for child in children {
-            Self::find_messages_in_element(child, chat_name, config, messages, last_messages, parser);
+            Self::find_messages_in_element(
+                child,
+                chat_name,
+                config,
+                messages,
+                last_messages,
+                parser,
+            );
         }
     }
 
@@ -1362,27 +1411,23 @@ impl WeChatManager {
     }
 
     /// 开始监控
-    pub fn start_monitoring(&self) -> impl std::future::Future<Output = Result<WeChatMonitorStatus>> + Send {
+    pub fn start_monitoring(
+        &self,
+    ) -> impl std::future::Future<Output = Result<WeChatMonitorStatus>> + Send {
         let monitor = self.monitor.clone();
-        async move {
-            monitor.start_monitoring().await
-        }
+        async move { monitor.start_monitoring().await }
     }
 
     /// 停止监控
     pub fn stop_monitoring(&self) -> impl std::future::Future<Output = Result<()>> + Send {
         let monitor = self.monitor.clone();
-        async move {
-            monitor.stop_monitoring().await
-        }
+        async move { monitor.stop_monitoring().await }
     }
 
     /// 获取状态
     pub fn get_status(&self) -> impl std::future::Future<Output = WeChatMonitorStatus> + Send {
         let monitor = self.monitor.clone();
-        async move {
-            monitor.get_status().await
-        }
+        async move { monitor.get_status().await }
     }
 
     /// 处理接收到的消息（自动回复集成入口）
@@ -1458,8 +1503,8 @@ impl WeChatManager {
         }
 
         // 查找微信进程
-        let pid = WeChatMonitor::find_wechat_process()
-            .ok_or_else(|| anyhow::anyhow!("微信未运行"))?;
+        let pid =
+            WeChatMonitor::find_wechat_process().ok_or_else(|| anyhow::anyhow!("微信未运行"))?;
 
         // 创建 AXUIElement
         let app_element = unsafe { AXUIElementCreateApplication(pid) };
@@ -1482,8 +1527,8 @@ impl WeChatManager {
 
         unsafe { CFRelease(app_element) };
 
-        let window = target_window
-            .ok_or_else(|| anyhow::anyhow!("未找到聊天窗口: {}", chat_name))?;
+        let window =
+            target_window.ok_or_else(|| anyhow::anyhow!("未找到聊天窗口: {}", chat_name))?;
 
         // 激活窗口（通过 Cmd+Tab 或点击）
         // 这里使用 AppleScript 来激活微信并切换到指定聊天
@@ -1491,7 +1536,8 @@ impl WeChatManager {
             tell application "WeChat"
                 activate
             end tell
-            "#.to_string();
+            "#
+        .to_string();
 
         // 执行 AppleScript
         let output = tokio::process::Command::new("osascript")
@@ -1570,7 +1616,10 @@ impl WeChatManager {
         config.auto_reply_enabled = enabled;
         self.monitor.update_config(config).await;
 
-        log::info!("[WeChat] 自动回复已{}", if enabled { "启用" } else { "禁用" });
+        log::info!(
+            "[WeChat] 自动回复已{}",
+            if enabled { "启用" } else { "禁用" }
+        );
     }
 
     /// 获取自动回复状态
@@ -1588,18 +1637,14 @@ impl Clone for WeChatMonitor {
     fn clone(&self) -> Self {
         // 使用 try_read 避免在异步运行时中阻塞
         // 如果无法获取锁，使用默认值
-        let config = self.config.try_read()
+        let config = self
+            .config
+            .try_read()
             .map(|c| c.clone())
             .unwrap_or_default();
-        let wechat_pid = self.wechat_pid.try_read()
-            .map(|p| *p)
-            .unwrap_or(None);
-        let last_check = self.last_check.try_read()
-            .map(|l| *l)
-            .unwrap_or(None);
-        let state = self.state.try_read()
-            .map(|s| s.clone())
-            .unwrap_or_default();
+        let wechat_pid = self.wechat_pid.try_read().map(|p| *p).unwrap_or(None);
+        let last_check = self.last_check.try_read().map(|l| *l).unwrap_or(None);
+        let state = self.state.try_read().map(|s| s.clone()).unwrap_or_default();
 
         Self {
             config: RwLock::new(config),
@@ -1626,9 +1671,8 @@ impl Default for WeChatManager {
 
 use once_cell::sync::Lazy;
 
-static WECHAT_MANAGER: Lazy<Arc<RwLock<WeChatManager>>> = Lazy::new(|| {
-    Arc::new(RwLock::new(WeChatManager::new()))
-});
+static WECHAT_MANAGER: Lazy<Arc<RwLock<WeChatManager>>> =
+    Lazy::new(|| Arc::new(RwLock::new(WeChatManager::new())));
 
 /// 获取全局微信管理器
 pub fn get_wechat_manager() -> Arc<RwLock<WeChatManager>> {
@@ -1760,10 +1804,14 @@ mod tests {
     fn test_message_parser_group_detection_english() {
         let parser = MessageParser::new();
 
-        let msg = parser.parse_raw_message("Test: content", "Work Group").unwrap();
+        let msg = parser
+            .parse_raw_message("Test: content", "Work Group")
+            .unwrap();
         assert!(msg.is_group);
 
-        let msg = parser.parse_raw_message("Test: content", "Chat Room").unwrap();
+        let msg = parser
+            .parse_raw_message("Test: content", "Chat Room")
+            .unwrap();
         assert!(msg.is_group);
     }
 

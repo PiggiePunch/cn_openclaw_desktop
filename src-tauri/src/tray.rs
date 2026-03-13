@@ -30,10 +30,13 @@ impl TrayManager {
     /// 显示托盘通知
     #[allow(dead_code)]
     pub fn show_notification(&self, title: &str, body: &str) -> tauri::Result<()> {
-        self.handle.emit("tray-notification", serde_json::json!({
-            "title": title,
-            "body": body
-        }))?;
+        self.handle.emit(
+            "tray-notification",
+            serde_json::json!({
+                "title": title,
+                "body": body
+            }),
+        )?;
 
         Ok(())
     }

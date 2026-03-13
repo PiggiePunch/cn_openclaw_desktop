@@ -2,11 +2,10 @@
 // 浏览器集成测试
 
 use openclaw_desktop::browser::{
-    PageClient,
-    process_new::{ChromeProcess, ChromeOptions},
+    process_new::{ChromeOptions, ChromeProcess},
     types::{FormField, FormFieldType},
+    PageClient,
 };
-
 
 // 注意：这些测试需要 Chrome/Chromium 浏览器环境
 // 运行测试时使用: cargo test --test browser_integration_tests --ignored
@@ -56,7 +55,10 @@ async fn test_snapshot_and_search() {
 
     let mut client = PageClient::launch(options).await.unwrap();
 
-    client.navigate("data:text/html,<h1>Hello World</h1><button>Click Me</button>").await.unwrap();
+    client
+        .navigate("data:text/html,<h1>Hello World</h1><button>Click Me</button>")
+        .await
+        .unwrap();
 
     let snapshot = client.snapshot().await.unwrap();
 
@@ -108,16 +110,25 @@ async fn test_click_and_type() {
     let mut client = PageClient::launch(options).await.unwrap();
 
     // 导航到包含输入框的页面
-    client.navigate("data:text/html,<input id='test' type='text'><button>Submit</button>").await.unwrap();
+    client
+        .navigate("data:text/html,<input id='test' type='text'><button>Submit</button>")
+        .await
+        .unwrap();
 
     // 使用交互器
     let interactor = client.interactor();
 
     // 输入文本（使用便捷方法）
-    client.type_text("#test", "Hello, World!", false).await.unwrap();
+    client
+        .type_text("#test", "Hello, World!", false)
+        .await
+        .unwrap();
 
     // 验证输入
-    let result = client.evaluate("document.getElementById('test').value").await.unwrap();
+    let result = client
+        .evaluate("document.getElementById('test').value")
+        .await
+        .unwrap();
     assert_eq!(result, "Hello, World!");
 
     // 点击按钮（使用便捷方法）
@@ -137,7 +148,10 @@ async fn test_screenshot() {
 
     let mut client = PageClient::launch(options).await.unwrap();
 
-    client.navigate("data:text/html,<h1>Screenshot Test</h1>").await.unwrap();
+    client
+        .navigate("data:text/html,<h1>Screenshot Test</h1>")
+        .await
+        .unwrap();
 
     let screenshot_data = client.screenshot("png").await.unwrap();
 
@@ -213,10 +227,16 @@ async fn test_fill_form() {
     client.fill_form(fields).await.unwrap();
 
     // 验证表单填写
-    let username = client.evaluate("document.querySelector(\"input[name='username']\").value").await.unwrap();
+    let username = client
+        .evaluate("document.querySelector(\"input[name='username']\").value")
+        .await
+        .unwrap();
     assert_eq!(username, "testuser");
 
-    let email = client.evaluate("document.querySelector(\"input[name='email']\").value").await.unwrap();
+    let email = client
+        .evaluate("document.querySelector(\"input[name='email']\").value")
+        .await
+        .unwrap();
     assert_eq!(email, "test@example.com");
 
     client.close().await.unwrap();
@@ -272,7 +292,10 @@ async fn test_wait_for_element() {
     client.evaluate(script).await.unwrap();
 
     // 等待元素出现（使用便捷方法）
-    let result = client.wait_for_element("#delayed-element", 5000).await.unwrap();
+    let result = client
+        .wait_for_element("#delayed-element", 5000)
+        .await
+        .unwrap();
     assert!(result);
 
     client.close().await.unwrap();
@@ -281,7 +304,7 @@ async fn test_wait_for_element() {
 #[tokio::test]
 #[ignore]
 async fn test_process_management() {
-    use openclaw_desktop::browser::process_new::{ChromeProcess, ChromeOptions};
+    use openclaw_desktop::browser::process_new::{ChromeOptions, ChromeProcess};
 
     let options = ChromeOptions {
         headless: true,

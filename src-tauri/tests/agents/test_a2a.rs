@@ -2,10 +2,8 @@
 //
 // 测试 Agent 间通信的各种功能
 
-use openclaw_desktop::agents::a2a::{
-    A2AManager, AgentId, AgentInfo, AgentStatus,
-};
 use chrono::Utc;
+use openclaw_desktop::agents::a2a::{A2AManager, AgentId, AgentInfo, AgentStatus};
 
 fn create_test_agent(id: &str, name: &str, status: AgentStatus) -> AgentInfo {
     AgentInfo {
@@ -82,7 +80,10 @@ fn test_agent_manager_unregister() {
 
         assert_eq!(manager.list_agents(None).await.len(), 1);
 
-        manager.unregister_agent(&AgentId::new("test-unregister")).await.unwrap();
+        manager
+            .unregister_agent(&AgentId::new("test-unregister"))
+            .await
+            .unwrap();
 
         assert_eq!(manager.list_agents(None).await.len(), 0);
     });
@@ -114,10 +115,9 @@ fn test_agent_call_success() {
     rt.block_on(async {
         manager.init_default_agents().await.unwrap();
 
-        let result = manager.call_agent(
-            &AgentId::new("agent-browser"),
-            "测试消息",
-        ).await;
+        let result = manager
+            .call_agent(&AgentId::new("agent-browser"), "测试消息")
+            .await;
 
         // P2 修复：无 runtime 时返回错误（防止生产环境误用）
         assert!(result.is_ok());
@@ -135,10 +135,9 @@ fn test_agent_call_not_found() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(async {
-        let result = manager.call_agent(
-            &AgentId::new("non-existent"),
-            "测试消息",
-        ).await;
+        let result = manager
+            .call_agent(&AgentId::new("non-existent"), "测试消息")
+            .await;
 
         assert!(result.is_err());
     });
@@ -153,10 +152,9 @@ fn test_agent_call_inactive() {
         let agent = create_test_agent("inactive-agent", "Inactive", AgentStatus::Inactive);
         manager.register_agent(agent).await.unwrap();
 
-        let result = manager.call_agent(
-            &AgentId::new("inactive-agent"),
-            "测试消息",
-        ).await;
+        let result = manager
+            .call_agent(&AgentId::new("inactive-agent"), "测试消息")
+            .await;
 
         assert!(result.is_ok());
         let call_result = result.unwrap();
@@ -174,10 +172,7 @@ fn test_agent_broadcast() {
     rt.block_on(async {
         manager.init_default_agents().await.unwrap();
 
-        let agent_ids = vec![
-            AgentId::new("agent-browser"),
-            AgentId::new("agent-memory"),
-        ];
+        let agent_ids = vec![AgentId::new("agent-browser"), AgentId::new("agent-memory")];
 
         let results = manager.broadcast(&agent_ids, "广播消息").await;
 
@@ -196,10 +191,7 @@ fn test_agent_broadcast_with_nonexistent() {
     rt.block_on(async {
         manager.init_default_agents().await.unwrap();
 
-        let agent_ids = vec![
-            AgentId::new("agent-browser"),
-            AgentId::new("non-existent"),
-        ];
+        let agent_ids = vec![AgentId::new("agent-browser"), AgentId::new("non-existent")];
 
         let results = manager.broadcast(&agent_ids, "广播消息").await;
 
@@ -253,11 +245,13 @@ fn test_call_agent_timeout_mechanism() {
         manager.init_default_agents().await.unwrap();
 
         // 测试 call_agent_with_timeout 方法存在且可调用
-        let result = manager.call_agent_with_timeout(
-            &AgentId::new("agent-browser"),
-            "测试消息",
-            100, // 100ms 超时
-        ).await;
+        let result = manager
+            .call_agent_with_timeout(
+                &AgentId::new("agent-browser"),
+                "测试消息",
+                100, // 100ms 超时
+            )
+            .await;
 
         // 应该返回成功（虽然可能失败，但不应该崩溃）
         assert!(result.is_ok());

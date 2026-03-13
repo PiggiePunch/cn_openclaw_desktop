@@ -115,8 +115,9 @@ custom-protocol = ["tauri/custom-protocol"]
 [profile.dev]
 # 开发模式也启用一定优化
 opt-level = 1
-# 启用增量编译
-incremental = true
+# 在部分 macOS + Rust 版本组合下，增量缓存会导致偶发链接符号缺失
+# 关闭增量编译以换取更稳定的本地开发构建
+incremental = false
 # 减少调试信息（减少编译时间和体积）
 debug = 1
 

@@ -1,7 +1,7 @@
 // src-tauri/tests/memory/test_embedding.rs
 // 嵌入向量生成测试
 
-use openclaw_desktop::memory::embedding::{EmbeddingClient, cosine_similarity};
+use openclaw_desktop::memory::embedding::{cosine_similarity, EmbeddingClient};
 use openclaw_desktop::memory::types::EmbeddingConfig;
 
 #[test]
@@ -10,7 +10,11 @@ fn test_cosine_similarity_identical() {
     let b = vec![1.0_f32, 2.0, 3.0, 4.0];
 
     let sim = cosine_similarity(&a, &b);
-    assert!((sim - 1.0).abs() < 0.001, "相同向量相似度应为 1.0, 实际为 {}", sim);
+    assert!(
+        (sim - 1.0).abs() < 0.001,
+        "相同向量相似度应为 1.0, 实际为 {}",
+        sim
+    );
 }
 
 #[test]
@@ -19,7 +23,11 @@ fn test_cosine_similarity_orthogonal() {
     let b = vec![0.0_f32, 1.0, 0.0];
 
     let sim = cosine_similarity(&a, &b);
-    assert!((sim - 0.0).abs() < 0.001, "正交向量相似度应为 0.0, 实际为 {}", sim);
+    assert!(
+        (sim - 0.0).abs() < 0.001,
+        "正交向量相似度应为 0.0, 实际为 {}",
+        sim
+    );
 }
 
 #[test]
@@ -28,7 +36,11 @@ fn test_cosine_similarity_opposite() {
     let b = vec![-1.0_f32, -1.0, -1.0];
 
     let sim = cosine_similarity(&a, &b);
-    assert!((sim - (-1.0)).abs() < 0.001, "相反向量相似度应为 -1.0, 实际为 {}", sim);
+    assert!(
+        (sim - (-1.0)).abs() < 0.001,
+        "相反向量相似度应为 -1.0, 实际为 {}",
+        sim
+    );
 }
 
 #[test]
@@ -46,7 +58,11 @@ fn test_cosine_similarity_partial_match() {
     let b = vec![1.0_f32, 2.0, 0.0];
 
     let sim = cosine_similarity(&a, &b);
-    assert!(sim > 0.0 && sim < 1.0, "部分匹配向量相似度应在 0 到 1 之间, 实际为 {}", sim);
+    assert!(
+        sim > 0.0 && sim < 1.0,
+        "部分匹配向量相似度应在 0 到 1 之间, 实际为 {}",
+        sim
+    );
 }
 
 #[test]
@@ -97,8 +113,7 @@ fn test_embedding_client_with_empty_config() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_embedding_api() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -119,14 +134,17 @@ async fn test_openai_embedding_api() {
 
     let embedding = embedding.unwrap();
     assert!(!embedding.is_empty(), "嵌入向量不应为空");
-    assert_eq!(embedding.len(), 1536, "OpenAI text-embedding-3-small 应返回 1536 维向量");
+    assert_eq!(
+        embedding.len(),
+        1536,
+        "OpenAI text-embedding-3-small 应返回 1536 维向量"
+    );
 }
 
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_embedding_chinese() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -152,8 +170,7 @@ async fn test_openai_embedding_chinese() {
 #[tokio::test]
 #[ignore = "需要 GEMINI_API_KEY 环境变量"]
 async fn test_gemini_embedding_api() {
-    let api_key = std::env::var("GEMINI_API_KEY")
-        .expect("需要设置 GEMINI_API_KEY 环境变量");
+    let api_key = std::env::var("GEMINI_API_KEY").expect("需要设置 GEMINI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "gemini".to_string(),
@@ -177,8 +194,7 @@ async fn test_gemini_embedding_api() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_embedding_consistency() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -204,14 +220,17 @@ async fn test_embedding_consistency() {
 
     // 计算相似度
     let sim = cosine_similarity(&embedding1, &embedding2);
-    assert!((sim - 1.0).abs() < 0.001, "相同文本的嵌入应完全相同, 相似度为 {}", sim);
+    assert!(
+        (sim - 1.0).abs() < 0.001,
+        "相同文本的嵌入应完全相同, 相似度为 {}",
+        sim
+    );
 }
 
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_embedding_different_texts() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -258,8 +277,7 @@ fn test_unsupported_provider() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_batch_embedding() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -297,8 +315,7 @@ async fn test_openai_batch_embedding() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_batch_embedding_empty() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -324,8 +341,7 @@ async fn test_openai_batch_embedding_empty() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_batch_embedding_large() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -358,8 +374,7 @@ async fn test_openai_batch_embedding_large() {
 #[tokio::test]
 #[ignore = "需要 OPENAI_API_KEY 环境变量"]
 async fn test_openai_batch_consistency() {
-    let api_key = std::env::var("OPENAI_API_KEY")
-        .expect("需要设置 OPENAI_API_KEY 环境变量");
+    let api_key = std::env::var("OPENAI_API_KEY").expect("需要设置 OPENAI_API_KEY 环境变量");
 
     let config = EmbeddingConfig {
         provider: "openai".to_string(),
@@ -387,5 +402,9 @@ async fn test_openai_batch_consistency() {
     assert_eq!(single.len(), batch_single.len(), "单独和批量嵌入维度应相同");
 
     let sim = cosine_similarity(&single, batch_single);
-    assert!((sim - 1.0).abs() < 0.001, "单独和批量嵌入应完全相同, 相似度为 {}", sim);
+    assert!(
+        (sim - 1.0).abs() < 0.001,
+        "单独和批量嵌入应完全相同, 相似度为 {}",
+        sim
+    );
 }

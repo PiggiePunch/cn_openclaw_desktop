@@ -4,8 +4,9 @@
 [build]
 jobs = 8
 
-# 增量编译缓存目录
-incremental = true
+# 在当前 macOS + rustc 组合下，增量缓存可能导致链接阶段未定义符号
+# 关闭增量编译，优先保证 tauri:dev 稳定
+incremental = false
 
 # ========== 链接器优化 (macOS) ==========
 [target.aarch64-apple-darwin]
@@ -13,16 +14,21 @@ incremental = true
 # linker = "clang"
 # rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
-# 优化编译时间
-rustflags = [
-  "-C", "target-cpu=native",  # 使用本地 CPU 特性
-]
+# 注意：
+# 在 macOS 26 + rustc 1.92 环境下，`target-cpu=native` 会触发链接阶段
+# 未定义符号（std::sys::thread_local::native::eager::destroy）问题。
+# 这里改为使用默认 target-cpu，保证 `tauri dev` 稳定可运行。
+# 如需极致性能，建议仅在 release 单独通过环境变量开启。
+# rustflags = [
+#   "-C", "target-cpu=native",
+# ]
 
 # ========== 通用优化 ==========
 [target.x86_64-apple-darwin]
-rustflags = [
-  "-C", "target-cpu=native",
-]
+# 同上，默认不强制 target-cpu=native。
+# rustflags = [
+#   "-C", "target-cpu=native",
+# ]
 
 # ========== 网络优化 ==========
 [net]

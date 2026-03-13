@@ -33,7 +33,11 @@ fn test_needs_compaction_true() {
     let messages: Vec<_> = (0..15)
         .map(|i| {
             create_test_message(
-                if i % 2 == 0 { MessageRole::User } else { MessageRole::Assistant },
+                if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                },
                 &format!("Message {}", i),
             )
         })
@@ -94,9 +98,9 @@ fn test_compact_simple_preserves_system_messages() {
     let result = compactor.compact_simple(&messages);
 
     // 应该保留系统消息
-    assert!(result.iter().any(|m| {
-        matches!(m.role, MessageRole::System) && m.content == "System prompt"
-    }));
+    assert!(result
+        .iter()
+        .any(|m| { matches!(m.role, MessageRole::System) && m.content == "System prompt" }));
 }
 
 #[test]

@@ -7,13 +7,13 @@
 // - 初始化配置文件
 // - 版本检查与更新
 
-use std::path::PathBuf;
-use std::process::Command as StdCommand;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::process::Command as StdCommand;
+use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Mutex;
-use std::sync::Arc;
 
 use crate::paths;
 
@@ -77,8 +77,38 @@ impl OpenClawManager {
         &self.install_dir
     }
 
-    /// 检查是否已安装
-    pub async fn is_installed(&self) -> bool {
+    /// 查找系统安装的 openclaw 可执行文件
+    fn find_system_openclaw_path() -> Option<PathBuf> {
+        #[cfg(unix)]
+        {
+            if let Ok(output) = StdCommand::new("which").arg("openclaw").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        let pb = PathBuf::from(path);
+                        return Some(pb.canonicalize().unwrap_or(pb));
+                    }
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            if let Ok(output) = StdCommand::new("where").arg("openclaw").output() {
+                if output.status.success() {
+                    if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                        let pb = PathBuf::from(path.trim());
+                        return Some(pb.canonicalize().unwrap_or(pb));
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Core 安装目录是否完整
+    fn is_core_installed(&self) -> bool {
         // 检查目录是否存在
         if !self.install_dir.exists() {
             return false;
@@ -95,9 +125,43 @@ impl OpenClawManager {
         node_modules.exists()
     }
 
+    fn parse_cli_version(raw: &str) -> Option<String> {
+        let first_line = raw.lines().next()?.trim();
+        if first_line.is_empty() {
+            return None;
+        }
+
+        // 示例: "OpenClaw 2026.3.11 (29dc654)"
+        if let Some(rest) = first_line.strip_prefix("OpenClaw ") {
+            if let Some(token) = rest.split_whitespace().next() {
+                if !token.is_empty() {
+                    return Some(token.to_string());
+                }
+            }
+        }
+
+        Some(first_line.to_string())
+    }
+
+    /// 检查是否已安装
+    pub async fn is_installed(&self) -> bool {
+        Self::find_system_openclaw_path().is_some() || self.is_core_installed()
+    }
+
     /// 获取当前安装的版本
     pub async fn get_installed_version(&self) -> Option<String> {
-        if !self.is_installed().await {
+        if let Some(exe) = Self::find_system_openclaw_path() {
+            if let Ok(output) = StdCommand::new(exe).arg("--version").output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Some(version) = Self::parse_cli_version(&stdout) {
+                        return Some(version);
+                    }
+                }
+            }
+        }
+
+        if !self.is_core_installed() {
             return None;
         }
 
@@ -106,7 +170,10 @@ impl OpenClawManager {
         if package_json.exists() {
             if let Ok(content) = fs::read_to_string(&package_json).await {
                 if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
-                    return pkg.get("version").and_then(|v| v.as_str()).map(|s| s.to_string());
+                    return pkg
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                 }
             }
         }
@@ -240,7 +307,11 @@ impl OpenClawManager {
             .output()?;
 
         let version = if version_output.status.success() {
-            Some(String::from_utf8_lossy(&version_output.stdout).trim().to_string())
+            Some(
+                String::from_utf8_lossy(&version_output.stdout)
+                    .trim()
+                    .to_string(),
+            )
         } else {
             Some("latest".to_string())
         };
@@ -270,15 +341,14 @@ impl OpenClawManager {
         let pattern = format!("openclaw-{}-{}", platform, arch);
 
         for asset in &version.assets {
-            if asset.name.contains(&pattern) && (asset.name.ends_with(".tar.gz") || asset.name.ends_with(".zip")) {
+            if asset.name.contains(&pattern)
+                && (asset.name.ends_with(".tar.gz") || asset.name.ends_with(".zip"))
+            {
                 return Ok(asset);
             }
         }
 
-        Err(anyhow::anyhow!(
-            "未找到适合 {} {} 的发行版",
-            platform, arch
-        ))
+        Err(anyhow::anyhow!("未找到适合 {} {} 的发行版", platform, arch))
     }
 
     /// 解压归档文件
@@ -297,7 +367,10 @@ impl OpenClawManager {
                 .output()?;
 
             if !output.status.success() {
-                return Err(anyhow::anyhow!("解压失败: {}", String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow::anyhow!(
+                    "解压失败: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         } else if extension == "zip" {
             // 解压 zip
@@ -308,7 +381,10 @@ impl OpenClawManager {
                 .output()?;
 
             if !output.status.success() {
-                return Err(anyhow::anyhow!("解压失败: {}", String::from_utf8_lossy(&output.stderr)));
+                return Err(anyhow::anyhow!(
+                    "解压失败: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
         } else {
             return Err(anyhow::anyhow!("不支持的归档格式: {}", extension));
@@ -510,6 +586,10 @@ impl OpenClawManager {
 
     /// 获取 OpenClaw 可执行文件路径
     pub fn get_executable_path(&self) -> PathBuf {
+        if let Some(path) = Self::find_system_openclaw_path() {
+            return path;
+        }
+
         let mjs_path = self.install_dir.join("openclaw.mjs");
 
         if mjs_path.exists() {
@@ -526,7 +606,7 @@ impl OpenClawManager {
     }
 }
 
-/// 全局安装管理器实例
+// 全局安装管理器实例
 lazy_static::lazy_static! {
     pub static ref MANAGER: OpenClawManager = OpenClawManager::new();
 }

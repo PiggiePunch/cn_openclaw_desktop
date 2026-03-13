@@ -2,9 +2,11 @@
 //
 // 测试会话归档器的各种功能
 
-use openclaw_desktop::agents::archive::{SessionArchiver, ArchiveSession, ArchiveResult, ArchiveId};
+use chrono::{Duration, Utc};
+use openclaw_desktop::agents::archive::{
+    ArchiveId, ArchiveResult, ArchiveSession, SessionArchiver,
+};
 use openclaw_desktop::agents::types::{ChatMessage, MessageRole};
-use chrono::{Utc, Duration};
 
 fn create_test_message(role: MessageRole, content: &str) -> ChatMessage {
     ChatMessage {
@@ -105,9 +107,7 @@ fn test_generate_summary_long_content_truncation() {
     let archiver = SessionArchiver::default_config();
 
     let long_content = "这是一条很长的消息内容".repeat(10);
-    let messages = vec![
-        create_test_message(MessageRole::User, &long_content),
-    ];
+    let messages = vec![create_test_message(MessageRole::User, &long_content)];
 
     let summary = archiver.generate_summary(&messages);
 
@@ -123,7 +123,9 @@ fn test_archive_session_without_memory_manager() {
 
     // 即使没有记忆管理器，归档也应该成功（返回模拟 ID）
     let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        archiver.archive_session(&session.id, &session.messages, session.last_active_at).await
+        archiver
+            .archive_session(&session.id, &session.messages, session.last_active_at)
+            .await
     });
 
     assert!(result.is_ok());
@@ -152,9 +154,9 @@ fn test_batch_archive_sessions() {
         create_test_session("recent-session", 10),
     ];
 
-    let results = tokio::runtime::Runtime::new().unwrap().block_on(async {
-        archiver.archive_sessions(sessions).await
-    });
+    let results = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async { archiver.archive_sessions(sessions).await });
 
     // 应该返回 3 个结果
     assert_eq!(results.len(), 3);
