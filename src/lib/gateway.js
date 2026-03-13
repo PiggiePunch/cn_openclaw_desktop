@@ -5,6 +5,12 @@
  * 实现请求/响应匹配、事件监听、自动重连、心跳保活等功能
  */
 
+import {
+  loadOrCreateDeviceIdentity,
+  signDevicePayload,
+  buildDeviceAuthPayload,
+} from './device-identity'
+
 // ============================================================================
 // 常量定义
 // ============================================================================
@@ -45,12 +51,38 @@ export class OpenClawGateway {
     // 心跳相关
     this.heartbeatTimer = null
 
-    // 握手信息
+    // 握手信息（必须符合 Gateway 协议规范）
     this.clientInfo = {
-      id: 'cn-desktop',
+      id: 'openclaw-control-ui',  // 必须是 GatewayClientId 枚举值之一
       version: '1.0.0',
       platform: 'desktop',
+      mode: 'ui',  // 必须是 GatewayClientMode 枚举值之一
     }
+
+    // 握手相关状态
+    this.connectNonce = null  // 收到的 challenge nonce
+    this.connectResolve = null  // connect Promise 的 resolve
+    this.connectReject = null  // connect Promise 的 reject
+
+        // Gateway 认证 token（从配置文件读取）
+    this.authToken = null
+
+    // 连接锁（防止并发连接）
+    this.connectingPromise = null
+  }
+
+  /**
+   * 设置认证 token
+   */
+  setAuthToken(token) {
+    this.authToken = token
+  }
+
+  /**
+   * 是否已设置认证 token
+   */
+  hasAuthToken() {
+    return typeof this.authToken === 'string' && this.authToken.length > 0
   }
 
   // ============================================================================
@@ -62,44 +94,57 @@ export class OpenClawGateway {
    * @returns {Promise<Object>} 握手响应
    */
   async connect() {
+    // 如果正在连接，返回同一个 Promise（防止并发连接）
+    if (this.connectingPromise) {
+      return this.connectingPromise
+    }
+
+    // 如果已连接，直接返回
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      console.log('[Gateway] 已经连接，无需重复连接')
       return { connected: true }
     }
 
+    // 创建新的连接 Promise 并存储（锁机制）
+    this.connectingPromise = this._doConnect()
+
+    try {
+      const result = await this.connectingPromise
+      return result
+    } finally {
+      this.connectingPromise = null  // 释放锁
+    }
+  }
+
+  /**
+   * 实际执行连接（内部方法）
+   * @private
+   */
+  async _doConnect() {
     this._setState(ConnectionState.CONNECTING)
     this.shouldReconnect = true
+    this.connectNonce = null
 
     return new Promise((resolve, reject) => {
+      // 存储 Promise 的 resolve/reject，供 challenge 处理后调用
+      this.connectResolve = resolve
+      this.connectReject = reject
+
       try {
         console.log(`[Gateway] 正在连接 ${this.url}...`)
         this.ws = new WebSocket(this.url)
 
         // 连接超时处理
         const connectTimeout = setTimeout(() => {
+          this.connectResolve = null
+          this.connectReject = null
           reject(new Error('连接超时'))
           this.ws?.close()
-        }, 10000)
+        }, 15000)
 
-        this.ws.onopen = async () => {
+        this.ws.onopen = () => {
           clearTimeout(connectTimeout)
-          console.log('[Gateway] WebSocket 已连接，开始握手...')
-
-          try {
-            // 发送 connect 握手
-            const response = await this._sendConnectHandshake()
-            console.log('[Gateway] 握手成功:', response)
-
-            this._setState(ConnectionState.CONNECTED)
-            this.reconnectAttempts = 0
-            this._startHeartbeat()
-
-            resolve(response)
-          } catch (error) {
-            console.error('[Gateway] 握手失败:', error)
-            this._setState(ConnectionState.DISCONNECTED)
-            reject(error)
-          }
+          console.log('[Gateway] WebSocket 已连接，等待 challenge...')
+          // 不主动发送 connect，等待 Gateway 发送 connect.challenge 事件
         }
 
         this.ws.onmessage = (event) => {
@@ -114,56 +159,141 @@ export class OpenClawGateway {
         this.ws.onclose = (event) => {
           clearTimeout(connectTimeout)
           console.log('[Gateway] WebSocket 关闭:', event.code, event.reason)
+          if (this.connectReject) {
+            this.connectReject(new Error(`连接关闭: ${event.code} ${event.reason}`))
+            this.connectResolve = null
+            this.connectReject = null
+          }
           this._handleDisconnect()
         }
       } catch (error) {
         this._setState(ConnectionState.DISCONNECTED)
+        this.connectResolve = null
+        this.connectReject = null
         reject(error)
       }
     })
   }
 
   /**
-   * 发送 connect 握手消息
+   * 处理 connect.challenge 事件，发送 connect 请求
+   * 注意：nonce 直接传递给 _sendConnectRequest，避免竞态条件
    */
-  async _sendConnectHandshake() {
-    return new Promise((resolve, reject) => {
+  async _handleConnectChallenge(payload) {
+    console.log('[Gateway] 收到 challenge:', payload)
+
+    // 直接从 payload 获取 nonce，传递给 _sendConnectRequest（避免竞态条件）
+    const nonce = payload?.nonce || ''
+
+    // 发送 connect 请求
+    try {
+      const response = await this._sendConnectRequest(nonce)
+      console.log('[Gateway] 握手成功:', response)
+
+      this._setState(ConnectionState.CONNECTED)
+      this.reconnectAttempts = 0
+      this._startHeartbeat()
+
+      if (this.connectResolve) {
+        this.connectResolve(response)
+        this.connectResolve = null
+        this.connectReject = null
+      }
+    } catch (error) {
+      console.error('[Gateway] 握手失败:', error)
+      this._setState(ConnectionState.DISCONNECTED)
+
+      if (this.connectReject) {
+        this.connectReject(error)
+        this.connectResolve = null
+        this.connectReject = null
+      }
+    }
+  }
+
+  /**
+   * 发送 connect 请求（收到 challenge 后调用）
+   * @param {string} nonce - 从 challenge 获取的 nonce（直接传递，避免竞态条件）
+   */
+  async _sendConnectRequest(nonce) {
+    return new Promise(async (resolve, reject) => {
       const id = `req-${++this.requestId}`
 
-      const handshakePayload = {
-        type: 'req',
-        id,
-        method: 'connect',
-        params: {
-          minProtocol: 3,
-          maxProtocol: 3,
-          client: this.clientInfo,
+      try {
+        // 加载或创建设备身份
+        const deviceIdentity = await loadOrCreateDeviceIdentity()
+
+        // 当前时间戳
+        const signedAt = Date.now()
+
+        // 构建完整的签名 payload（v2 格式，必须与 Gateway 服务器验证逻辑一致）
+        const nonceToSign = nonce || ''
+        const scopes = ['operator.admin', 'operator.approvals', 'operator.pairing']
+        const authPayload = buildDeviceAuthPayload({
+          deviceId: deviceIdentity.deviceId,
+          clientId: this.clientInfo.id,
+          clientMode: this.clientInfo.mode,
           role: 'operator',
-          scopes: ['operator.read', 'operator.write'],
-        },
+          scopes,
+          signedAtMs: signedAt,
+          token: this.authToken || '',
+          nonce: nonceToSign,
+        })
+        // 对完整 payload 签名（而不是只签 nonce！）
+        const signature = await signDevicePayload(deviceIdentity.privateKey, authPayload)
+
+        // 构建握手请求（使用 device 字段，不是 identity）
+        const handshakePayload = {
+          type: 'req',
+          id,
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: this.clientInfo,
+            role: 'operator',
+            scopes: ['operator.admin', 'operator.approvals', 'operator.pairing'],
+            device: {
+              id: deviceIdentity.deviceId,
+              publicKey: deviceIdentity.publicKey,
+              signature,
+              signedAt,
+              nonce: nonceToSign,
+            },
+            // 总是传递 auth 字段，即使 token 为空
+            auth: { token: this.authToken || '' },
+          },
+        }
+
+        // 设置超时
+        const timeout = setTimeout(() => {
+          this.pendingRequests.delete(id)
+          reject(new Error('握手超时'))
+        }, REQUEST_TIMEOUT)
+
+        // 存储待处理请求
+        this.pendingRequests.set(id, {
+          resolve: (response) => {
+            clearTimeout(timeout)
+            resolve(response)
+          },
+          reject: (error) => {
+            clearTimeout(timeout)
+            reject(error)
+          },
+        })
+
+        // 发送握手消息
+        this.ws.send(JSON.stringify(handshakePayload))
+        console.log('[Gateway] 发送 connect 请求（含设备身份）:', {
+          id,
+          deviceId: deviceIdentity.deviceId.substring(0, 8) + '...',
+          hasToken: !!this.authToken,
+        })
+      } catch (error) {
+        console.error('[Gateway] 设备身份认证失败:', error)
+        reject(error)
       }
-
-      // 设置超时
-      const timeout = setTimeout(() => {
-        this.pendingRequests.delete(id)
-        reject(new Error('握手超时'))
-      }, REQUEST_TIMEOUT)
-
-      // 存储待处理请求
-      this.pendingRequests.set(id, {
-        resolve: (response) => {
-          clearTimeout(timeout)
-          resolve(response)
-        },
-        reject: (error) => {
-          clearTimeout(timeout)
-          reject(error)
-        },
-      })
-
-      // 发送握手消息
-      this.ws.send(JSON.stringify(handshakePayload))
-      console.log('[Gateway] 发送握手消息:', handshakePayload)
     })
   }
 
@@ -255,7 +385,8 @@ export class OpenClawGateway {
     this.heartbeatTimer = setInterval(async () => {
       if (this.ws?.readyState === WebSocket.OPEN) {
         try {
-          await this.call('ping', {})
+          // Gateway 不支持 ping，使用 health 作为轻量保活请求
+          await this.call('health', {})
         } catch (error) {
           console.warn('[Gateway] 心跳失败:', error)
         }
@@ -310,7 +441,7 @@ export class OpenClawGateway {
       if (ok) {
         pending.resolve(payload)
       } else {
-        pending.reject(new Error(error || '请求失败'))
+        pending.reject(this._normalizeGatewayError(error))
       }
       this.pendingRequests.delete(id)
     } else {
@@ -322,6 +453,12 @@ export class OpenClawGateway {
    * 处理事件
    */
   _handleEvent(eventName, payload) {
+    // 特殊处理 connect.challenge 事件
+    if (eventName === 'connect.challenge') {
+      this._handleConnectChallenge(payload)
+      return
+    }
+
     console.log(`[Gateway] 收到事件 [${eventName}]:`, payload)
 
     const handlers = this.eventHandlers.get(eventName)
@@ -358,7 +495,7 @@ export class OpenClawGateway {
     const pending = this.pendingRequests.get(id)
     if (pending && pending.onStream) {
       if (error) {
-        pending.onStream({ error: new Error(error) })
+        pending.onStream({ error: this._normalizeGatewayError(error) })
         this.pendingRequests.delete(id)
       } else if (done) {
         pending.onStream({ done: true })
@@ -367,6 +504,47 @@ export class OpenClawGateway {
         pending.onStream({ chunk })
       }
     }
+  }
+
+  /**
+   * 规范化 Gateway 错误对象，保留 code/details，避免 [object Object]
+   */
+  _normalizeGatewayError(error) {
+    if (!error) return new Error('请求失败')
+
+    if (error instanceof Error) return error
+
+    if (typeof error === 'string') {
+      return new Error(error)
+    }
+
+    if (typeof error === 'object') {
+      const rawMessage = error.message ?? error.error ?? error.reason
+      let message = ''
+      if (typeof rawMessage === 'string') {
+        message = rawMessage
+      } else if (rawMessage !== undefined) {
+        try {
+          message = JSON.stringify(rawMessage)
+        } catch {
+          message = String(rawMessage)
+        }
+      } else {
+        try {
+          message = JSON.stringify(error)
+        } catch {
+          message = String(error)
+        }
+      }
+      const err = new Error(message || '请求失败')
+      if (error.code) err.code = error.code
+      if (error.details) err.details = error.details
+      if (error.data) err.data = error.data
+      err.raw = error
+      return err
+    }
+
+    return new Error(String(error))
   }
 
   // ============================================================================

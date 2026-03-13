@@ -19,6 +19,11 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { listen } from '@tauri-apps/api/event'
 
+function isTauriRuntime() {
+  if (typeof window === 'undefined') return false
+  return Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__?.core)
+}
+
 /**
  * 单个事件监听 Hook
  *
@@ -35,6 +40,8 @@ export function useTauriEvent(eventName, handler, deps = []) {
   }, [handler])
 
   useEffect(() => {
+    if (!isTauriRuntime()) return
+
     let unlisten = null
     let mounted = true
 
@@ -87,6 +94,8 @@ export function useTauriEvents(events, deps = []) {
   }, [events])
 
   useEffect(() => {
+    if (!isTauriRuntime()) return
+
     const unlisteners = []
     let mounted = true
 
@@ -140,6 +149,8 @@ export function useTauriEventControl(eventName) {
   const handlerRef = useRef(null)
 
   const subscribe = useCallback(async (handler) => {
+    if (!isTauriRuntime()) return
+
     // 如果已有监听器，先移除
     if (unlistenRef.current) {
       await unlistenRef.current()

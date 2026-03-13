@@ -153,7 +153,8 @@ function reducer(state, action) {
 // 构建智能体名称映射
 function buildAgentNames(agents, metadata) {
   const names = { main: '默认助手' }
-  agents.forEach(agent => {
+  const list = Array.isArray(agents) ? agents : []
+  list.forEach(agent => {
     if (agent.id && agent.id !== 'main') {
       names[agent.id] = metadata[agent.id]?.name || agent.name || `智能体-${agent.id}`
     }
@@ -185,7 +186,8 @@ const actions = {
     dispatch({ type: 'SET_LOADING', key: 'agents', value: false })
 
     if (result.success) {
-      dispatch({ type: 'SET_AGENTS', agents: result.data || [] })
+      const agents = Array.isArray(result.data) ? result.data : []
+      dispatch({ type: 'SET_AGENTS', agents })
     } else {
       dispatch({ type: 'SET_ERROR', key: 'agents', error: result.error })
     }

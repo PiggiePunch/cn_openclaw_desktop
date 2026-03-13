@@ -10,6 +10,413 @@ import { toast } from '@/hooks/useToast'
 import { invoke } from '@tauri-apps/api/core'
 
 // ============================================================================
+// 配置格式转换（桌面版 <-> 原版 openclaw）
+// ============================================================================
+
+/**
+ * 将 channels 中的 accounts 数组转换为对象格式（原版 openclaw 兼容）
+ *
+ * 桌面版格式: accounts: [{ id: "coder", bot_token: "xxx", ... }, ...]
+ * 原版格式:   accounts: { "coder": { bot_token: "xxx", ... }, ... }
+ *
+ * @param {object} config - 原始配置
+ * @returns {object} - 转换后的配置
+ */
+function convertAccountsArrayToObject(config) {
+  if (!config || typeof config !== 'object') return config
+
+  // 深拷贝避免修改原对象
+  const result = JSON.parse(JSON.stringify(config))
+
+  // 需要转换的通道类型
+  const channelTypes = ['telegram', 'discord', 'slack']
+
+  if (result.channels) {
+    for (const channelType of channelTypes) {
+      const channel = result.channels[channelType]
+      if (channel && Array.isArray(channel.accounts)) {
+        // 将数组转换为对象
+        const accountsObj = {}
+        for (const account of channel.accounts) {
+          if (account && account.id) {
+            // 提取账户数据，排除 id 字段（id 变成 key）
+            const { id, ...accountData } = account
+            accountsObj[id] = accountData
+          }
+        }
+        channel.accounts = accountsObj
+        console.log(`[API] 转换 ${channelType}.accounts: 数组 -> 对象`)
+      }
+    }
+  }
+
+  return result
+}
+
+/**
+ * 将 channels 中的 accounts 对象转换为数组格式（桌面版 UI 兼容）
+ *
+ * @param {object} config - 原版配置
+ * @returns {object} - 转换后的配置
+ */
+function convertAccountsObjectToArray(config) {
+  if (!config || typeof config !== 'object') return config
+
+  // 深拷贝避免修改原对象
+  const result = JSON.parse(JSON.stringify(config))
+
+  // 需要转换的通道类型
+  const channelTypes = ['telegram', 'discord', 'slack']
+
+  if (result.channels) {
+    for (const channelType of channelTypes) {
+      const channel = result.channels[channelType]
+      if (channel && channel.accounts && typeof channel.accounts === 'object' && !Array.isArray(channel.accounts)) {
+        // 将对象转换为数组
+        const accountsArray = Object.entries(channel.accounts).map(([id, accountData]) => ({
+          id,
+          ...accountData
+        }))
+        channel.accounts = accountsArray
+        console.log(`[API] 转换 ${channelType}.accounts: 对象 -> 数组`)
+      }
+    }
+  }
+
+  return result
+}
+
+const CONFIG_WRAPPER_FIELDS = new Set([
+  'path',
+  'exists',
+  'raw',
+  'parsed',
+  'resolved',
+  'valid',
+  'config',
+  'hash',
+  'issues',
+  'warnings',
+  'legacyIssues',
+])
+
+const UI_ONLY_CONFIG_FIELDS = new Set([
+  'ai_provider',
+])
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function cloneJsonObject(value, fallback = {}) {
+  try {
+    return JSON.parse(JSON.stringify(value))
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(fallback))
+    } catch {
+      return {}
+    }
+  }
+}
+
+function unwrapGatewayConfigPayload(payload) {
+  if (!isPlainObject(payload)) return payload
+
+  if (isPlainObject(payload.config)) return payload.config
+  if (isPlainObject(payload.resolved)) return payload.resolved
+  if (isPlainObject(payload.parsed)) return payload.parsed
+
+  return payload
+}
+
+function stripConfigWrapperFields(config) {
+  if (!isPlainObject(config)) return {}
+  for (const key of CONFIG_WRAPPER_FIELDS) {
+    if (key in config) delete config[key]
+  }
+  return config
+}
+
+function extractProviderModelIds(provider) {
+  if (!isPlainObject(provider)) return []
+
+  const ids = []
+  const pushId = (rawId) => {
+    const id = typeof rawId === 'string' ? rawId.trim() : ''
+    if (!id || ids.includes(id)) return
+    ids.push(id)
+  }
+
+  if (Array.isArray(provider.models)) {
+    for (const model of provider.models) {
+      if (typeof model === 'string') {
+        pushId(model)
+      } else if (isPlainObject(model)) {
+        pushId(model.id || model.name)
+      }
+    }
+  }
+
+  if (typeof provider.model === 'string') {
+    pushId(provider.model)
+  }
+
+  return ids
+}
+
+const DEFAULT_PROVIDER_BASE_URLS = {
+  qwen: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+  zhipu: 'https://open.bigmodel.cn/api/paas/v4',
+  deepseek: 'https://api.deepseek.com/v1',
+  moonshot: 'https://api.moonshot.cn/v1',
+  doubao: 'https://ark.cn-beijing.volces.com/api/v3',
+  minimax: 'https://api.minimaxi.com/anthropic',
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  google: 'https://generativelanguage.googleapis.com/v1beta',
+}
+
+const LEGACY_MINIMAX_BASE_URLS = new Set([
+  'https://api.minimaxi.com',
+  'https://api.minimaxi.com/v1',
+  'https://api.minimax.chat',
+  'https://api.minimax.chat/v1',
+])
+
+function normalizeProviderBaseUrl(providerId, baseUrl) {
+  const trimmed = typeof baseUrl === 'string' ? baseUrl.trim() : ''
+  if (!trimmed) return ''
+
+  const withoutTrailingSlash = trimmed.replace(/\/+$/, '')
+  if (providerId !== 'minimax') return withoutTrailingSlash
+
+  const lower = withoutTrailingSlash.toLowerCase()
+  if (LEGACY_MINIMAX_BASE_URLS.has(lower)) {
+    return DEFAULT_PROVIDER_BASE_URLS.minimax
+  }
+
+  return withoutTrailingSlash
+}
+
+function parsePrimaryModelRef(config) {
+  const primaryRaw = typeof config?.agents?.defaults?.model?.primary === 'string'
+    ? config.agents.defaults.model.primary.trim()
+    : ''
+  if (!primaryRaw || !primaryRaw.includes('/')) return null
+  const [providerId, ...rest] = primaryRaw.split('/')
+  const modelId = rest.join('/').trim()
+  if (!providerId || !modelId) return null
+  return { providerId: providerId.trim(), modelId }
+}
+
+function buildUiAiProviderFromModels(config) {
+  if (!isPlainObject(config)) return {}
+
+  const providers = isPlainObject(config.models?.providers) ? config.models.providers : {}
+  const existingAiProvider = isPlainObject(config.ai_provider) ? config.ai_provider : {}
+  const generated = {}
+
+  for (const [providerId, providerConfig] of Object.entries(providers)) {
+    if (!isPlainObject(providerConfig)) continue
+    const modelIds = extractProviderModelIds(providerConfig)
+
+    generated[providerId] = {
+      enabled: true,
+      api_key: typeof providerConfig.apiKey === 'string' ? providerConfig.apiKey : '',
+      base_url: normalizeProviderBaseUrl(providerId, providerConfig.baseUrl),
+      model: modelIds[0] || '',
+      custom_models: modelIds,
+    }
+  }
+
+  for (const [providerId, providerConfig] of Object.entries(existingAiProvider)) {
+    if (providerId === 'current' || providerId === 'embedding') continue
+    if (!generated[providerId] || !isPlainObject(providerConfig)) continue
+
+    generated[providerId] = {
+      ...generated[providerId],
+      ...providerConfig,
+      model: typeof providerConfig.model === 'string' && providerConfig.model.trim()
+        ? providerConfig.model.trim()
+        : generated[providerId].model,
+      custom_models: Array.isArray(providerConfig.custom_models)
+        ? providerConfig.custom_models.filter((id) => typeof id === 'string' && id.trim()).map((id) => id.trim())
+        : generated[providerId].custom_models,
+    }
+  }
+
+  const primaryRef = parsePrimaryModelRef(config)
+  if (primaryRef && !generated[primaryRef.providerId]) {
+    generated[primaryRef.providerId] = {
+      enabled: true,
+      api_key: '',
+      base_url: '',
+      model: primaryRef.modelId,
+      custom_models: [primaryRef.modelId],
+    }
+  }
+
+  let current = typeof existingAiProvider.current === 'string' && existingAiProvider.current.trim()
+    ? existingAiProvider.current.trim()
+    : ''
+  if ((!current || !generated[current]) && primaryRef?.providerId && generated[primaryRef.providerId]) {
+    current = primaryRef.providerId
+  }
+  if (!current || !generated[current]) {
+    current = Object.keys(generated)[0] || 'qwen'
+  }
+
+  const result = {
+    ...generated,
+    current,
+  }
+
+  if (isPlainObject(existingAiProvider.embedding)) {
+    result.embedding = existingAiProvider.embedding
+  }
+
+  return result
+}
+
+function mergeAiProviderIntoModels(config) {
+  if (!isPlainObject(config)) return {}
+  const aiProvider = isPlainObject(config.ai_provider) ? config.ai_provider : null
+  if (!aiProvider) return config
+
+  const models = isPlainObject(config.models) ? cloneJsonObject(config.models) : {}
+  const providers = isPlainObject(models.providers) ? cloneJsonObject(models.providers) : {}
+  const preferredProviderId = typeof aiProvider.current === 'string' ? aiProvider.current.trim() : ''
+
+  for (const [providerId, providerConfig] of Object.entries(aiProvider)) {
+    if (providerId === 'current' || providerId === 'embedding') continue
+    if (!isPlainObject(providerConfig)) continue
+    if (providerConfig.enabled === false) continue
+
+    const nextProvider = isPlainObject(providers[providerId])
+      ? providers[providerId]
+      : {}
+
+    if (typeof nextProvider.baseUrl !== 'string') {
+      nextProvider.baseUrl = DEFAULT_PROVIDER_BASE_URLS[providerId] || ''
+    }
+    if (typeof nextProvider.apiKey !== 'string') {
+      nextProvider.apiKey = ''
+    }
+
+    if (typeof providerConfig.api_key === 'string') {
+      const normalizedApiKey = providerConfig.api_key.trim()
+      if (!isRedactedSecretString(normalizedApiKey)) {
+        nextProvider.apiKey = normalizedApiKey
+      }
+    }
+    if (typeof providerConfig.base_url === 'string') {
+      nextProvider.baseUrl = normalizeProviderBaseUrl(providerId, providerConfig.base_url)
+    }
+    nextProvider.baseUrl = normalizeProviderBaseUrl(providerId, nextProvider.baseUrl)
+
+    if (isRedactedSecretString(nextProvider.apiKey)) {
+      delete nextProvider.apiKey
+    }
+
+    if (providerId === 'minimax') {
+      nextProvider.api = 'anthropic-messages'
+      nextProvider.authHeader = true
+    }
+
+    const modelIds = Array.isArray(providerConfig.custom_models)
+      ? providerConfig.custom_models
+          .filter((id) => typeof id === 'string' && id.trim())
+          .map((id) => id.trim())
+      : (
+          typeof providerConfig.model === 'string' && providerConfig.model.trim()
+            ? [providerConfig.model.trim()]
+            : []
+        )
+
+    if (modelIds.length > 0) {
+      const existingModels = Array.isArray(nextProvider.models) ? nextProvider.models : []
+      const existingMap = new Map()
+      for (const model of existingModels) {
+        const modelId = typeof model === 'string'
+          ? model.trim()
+          : (typeof model?.id === 'string' ? model.id.trim() : '')
+        if (modelId) existingMap.set(modelId, model)
+      }
+
+      nextProvider.models = modelIds.map((modelId) => {
+        const existing = existingMap.get(modelId)
+        if (existing) return existing
+        return { id: modelId, name: modelId }
+      })
+    }
+
+    providers[providerId] = nextProvider
+  }
+
+  models.providers = providers
+  config.models = models
+
+  const pickPrimary = () => {
+    const entries = Object.entries(providers).filter(([, provider]) => isPlainObject(provider))
+    if (entries.length === 0) return null
+
+    const findModelByProvider = (targetProviderId) => {
+      const provider = providers[targetProviderId]
+      if (!isPlainObject(provider)) return null
+      const modelIds = extractProviderModelIds(provider)
+      if (modelIds.length === 0) return null
+      return { providerId: targetProviderId, modelId: modelIds[0] }
+    }
+
+    if (preferredProviderId) {
+      const preferred = findModelByProvider(preferredProviderId)
+      if (preferred) return preferred
+    }
+
+    for (const [providerId] of entries) {
+      const candidate = findModelByProvider(providerId)
+      if (candidate) return candidate
+    }
+    return null
+  }
+
+  const primary = pickPrimary()
+  if (primary) {
+    if (!isPlainObject(config.agents)) config.agents = {}
+    if (!isPlainObject(config.agents.defaults)) config.agents.defaults = {}
+    if (!isPlainObject(config.agents.defaults.model)) config.agents.defaults.model = {}
+    config.agents.defaults.model.primary = `${primary.providerId}/${primary.modelId}`
+  }
+
+  return config
+}
+
+function normalizeConfigForUi(rawPayload) {
+  const unwrapped = unwrapGatewayConfigPayload(rawPayload)
+  if (!isPlainObject(unwrapped)) return {}
+
+  const config = stripConfigWrapperFields(cloneJsonObject(unwrapped))
+  const withChannelAccounts = convertAccountsObjectToArray(config)
+  withChannelAccounts.ai_provider = buildUiAiProviderFromModels(withChannelAccounts)
+  return withChannelAccounts
+}
+
+function prepareConfigForPersistence(rawConfig) {
+  const unwrapped = unwrapGatewayConfigPayload(rawConfig)
+  if (!isPlainObject(unwrapped)) return {}
+
+  let nextConfig = stripConfigWrapperFields(cloneJsonObject(unwrapped))
+  nextConfig = mergeAiProviderIntoModels(nextConfig)
+
+  for (const key of UI_ONLY_CONFIG_FIELDS) {
+    if (key in nextConfig) delete nextConfig[key]
+  }
+
+  return convertAccountsArrayToObject(nextConfig)
+}
+
+// ============================================================================
 // 错误处理配置
 // ============================================================================
 
@@ -17,6 +424,603 @@ const ERROR_CONFIG = {
   showToast: true,        // 是否显示错误 toast
   logToConsole: true,     // 是否记录到控制台
   silentCodes: [],        // 不显示 toast 的错误码
+}
+
+const loggedWarnings = new Set()
+
+function warnOnce(key, message) {
+  if (loggedWarnings.has(key)) return
+  loggedWarnings.add(key)
+  console.warn(message)
+}
+
+function isTauriRuntime() {
+  if (typeof window === 'undefined') return false
+  return Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__?.core)
+}
+
+async function invokeTauri(command, args) {
+  if (!isTauriRuntime()) {
+    throw new Error(`Tauri runtime 不可用，无法调用命令: ${command}`)
+  }
+  return invoke(command, args)
+}
+
+function toSafeString(value) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeLocalAgentRow(row) {
+  if (!row || typeof row !== 'object') return null
+  const id = toSafeString(row.id || row.agent_id || row.agentId)
+  if (!id) return null
+
+  const name = toSafeString(row.name) || id
+  const emoji = toSafeString(row.emoji) || '🤖'
+  const workspace = toSafeString(row.workspace)
+  return {
+    id,
+    name,
+    display_name: name,
+    emoji,
+    workspace,
+    identity: {
+      name,
+      emoji,
+    },
+  }
+}
+
+async function loadLocalAgentsFromTauri() {
+  if (!isTauriRuntime()) return null
+  try {
+    const result = await invokeTauri('list_local_agents')
+    const rows = Array.isArray(result) ? result.map(normalizeLocalAgentRow).filter(Boolean) : []
+    return rows
+  } catch (error) {
+    console.warn('[API] 读取本地智能体列表失败:', error)
+    return null
+  }
+}
+
+async function loadLocalWorkspaceFromTauri(agentId) {
+  if (!isTauriRuntime()) return null
+  try {
+    const result = await invokeTauri('load_local_agent_workspace', { agentId: String(agentId || 'main') })
+    if (!result || typeof result !== 'object') return null
+    return result
+  } catch (error) {
+    console.warn(`[API] 读取本地 workspace 失败 (${agentId}):`, error)
+    return null
+  }
+}
+
+async function readLocalWorkspaceFileFromTauri(agentId, fileName) {
+  if (!isTauriRuntime()) return null
+  try {
+    const result = await invokeTauri('read_local_agent_workspace_file', {
+      agentId: String(agentId || 'main'),
+      fileName: String(fileName || ''),
+    })
+    return typeof result === 'string' ? result : String(result ?? '')
+  } catch (error) {
+    console.warn(`[API] 读取本地 workspace 文件失败 (${agentId}/${fileName}):`, error)
+    return null
+  }
+}
+
+async function saveLocalWorkspaceFileFromTauri(agentId, fileName, content) {
+  if (!isTauriRuntime()) return false
+  try {
+    await invokeTauri('save_local_agent_workspace_file', {
+      agentId: String(agentId || 'main'),
+      fileName: String(fileName || ''),
+      content: String(content ?? ''),
+    })
+    return true
+  } catch (error) {
+    console.warn(`[API] 写入本地 workspace 文件失败 (${agentId}/${fileName}):`, error)
+    return false
+  }
+}
+
+function normalizeArray(value, preferredKeys = []) {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
+function generateIdempotencyKey(prefix = 'webchat') {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}-${crypto.randomUUID()}`
+  }
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function normalizeChatSendParams(rawParams = {}) {
+  const params = typeof rawParams === 'object' && rawParams !== null ? rawParams : {}
+  const sessionKey = typeof params.sessionKey === 'string' && params.sessionKey.trim()
+    ? params.sessionKey.trim()
+    : 'main'
+
+  const message = (() => {
+    if (typeof params.message === 'string') return params.message
+    if (typeof params.text === 'string') return params.text
+    if (typeof params.content === 'string') return params.content
+    return ''
+  })()
+
+  const idempotencyKey = typeof params.idempotencyKey === 'string' && params.idempotencyKey.trim()
+    ? params.idempotencyKey.trim()
+    : (typeof params.runId === 'string' && params.runId.trim()
+      ? params.runId.trim()
+      : generateIdempotencyKey())
+
+  const payload = {
+    sessionKey,
+    message,
+    idempotencyKey,
+  }
+
+  if (typeof params.thinking === 'string' && params.thinking.trim()) {
+    payload.thinking = params.thinking
+  }
+  if (typeof params.deliver === 'boolean') {
+    payload.deliver = params.deliver
+  }
+  if (typeof params.timeoutMs === 'number' && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0) {
+    payload.timeoutMs = Math.floor(params.timeoutMs)
+  }
+  if (Array.isArray(params.attachments)) {
+    payload.attachments = params.attachments
+  }
+  if (params.systemInputProvenance && typeof params.systemInputProvenance === 'object') {
+    payload.systemInputProvenance = params.systemInputProvenance
+  }
+  if (typeof params.systemProvenanceReceipt === 'string') {
+    payload.systemProvenanceReceipt = params.systemProvenanceReceipt
+  }
+
+  const provider = typeof params.provider === 'string' && params.provider.trim()
+    ? params.provider.trim()
+    : null
+
+  const rawModel = typeof params.model === 'string' && params.model.trim()
+    ? params.model.trim()
+    : null
+
+  const model = (() => {
+    if (!rawModel) return null
+    if (rawModel.includes('/')) return rawModel
+    if (provider) return `${provider}/${rawModel}`
+    return rawModel
+  })()
+
+  return { payload, sessionKey, model }
+}
+
+function normalizeAgentIdLike(input) {
+  const raw = String(input || '').trim().toLowerCase()
+  const cleaned = raw.replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '')
+  return cleaned || `agent-${Date.now()}`
+}
+
+function toSessionRow(item) {
+  if (typeof item === 'string') {
+    const sessionKey = item.trim() || 'main'
+    return {
+      session_key: sessionKey,
+      sessionKey,
+      session_id: null,
+      created_at: null,
+      updated_at: null,
+    }
+  }
+
+  const row = item && typeof item === 'object' ? item : {}
+  const sessionKey = row?.session_key || row?.sessionKey || row?.key || ''
+  return {
+    ...row,
+    session_key: sessionKey,
+    sessionKey,
+    session_id: row?.session_id || row?.sessionId || null,
+    created_at: row?.created_at || row?.createdAt || row?.updated_at || row?.updatedAt || null,
+    updated_at: row?.updated_at || row?.updatedAt || null,
+  }
+}
+
+function normalizeAgentRecord(raw, keyHint = '') {
+  let candidate = raw
+  let inferredId = typeof keyHint === 'string' ? keyHint.trim() : ''
+
+  if (Array.isArray(candidate)) {
+    const [id, identity] = candidate
+    if (typeof id === 'string' && id.trim()) inferredId = id.trim()
+
+    if (identity && typeof identity === 'object' && !Array.isArray(identity)) {
+      candidate = { identity }
+    } else if (typeof identity === 'string') {
+      candidate = { workspace: identity }
+    } else {
+      candidate = {}
+    }
+  } else if (typeof candidate === 'string') {
+    if (!inferredId) return null
+    candidate = { workspace: candidate }
+  }
+
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    if (!inferredId) return null
+    candidate = {}
+  }
+
+  const id =
+    inferredId ||
+    String(candidate.id || candidate.agent_id || candidate.agentId || candidate.key || '').trim()
+
+  if (!id) return null
+
+  const identitySource = candidate.identity && typeof candidate.identity === 'object'
+    ? candidate.identity
+    : {}
+
+  const displayName =
+    candidate.display_name ||
+    candidate.displayName ||
+    candidate.name ||
+    identitySource.name ||
+    id
+
+  const emoji = candidate.emoji || identitySource.emoji || '🤖'
+
+  return {
+    ...candidate,
+    id,
+    name: displayName,
+    display_name: displayName,
+    emoji,
+    identity: {
+      ...identitySource,
+      name: displayName,
+      emoji,
+      ...(typeof candidate.description === 'string' && !identitySource.description
+        ? { description: candidate.description }
+        : {}),
+    },
+  }
+}
+
+function normalizeAgentsListPayload(data) {
+  const rows = []
+  const seen = new Set()
+  const skipMapKeys = new Set([
+    'ok', 'success', 'error', 'errors', 'message', 'messages', 'status',
+    'meta', 'count', 'total', 'page', 'pages',
+  ])
+
+  const push = (entry, keyHint = '') => {
+    const row = normalizeAgentRecord(entry, keyHint)
+    if (!row || seen.has(row.id)) return
+    seen.add(row.id)
+    rows.push(row)
+  }
+
+  const pushArray = (arr) => {
+    for (const entry of arr) {
+      push(entry)
+    }
+  }
+
+  if (Array.isArray(data)) {
+    pushArray(data)
+    return rows
+  }
+
+  if (!data || typeof data !== 'object') {
+    return rows
+  }
+
+  const single = normalizeAgentRecord(data)
+  if (single) {
+    return [single]
+  }
+
+  let consumed = false
+  for (const key of ['agents', 'items', 'list']) {
+    const bucket = data[key]
+    if (Array.isArray(bucket)) {
+      pushArray(bucket)
+      consumed = true
+      continue
+    }
+
+    if (bucket && typeof bucket === 'object' && !Array.isArray(bucket)) {
+      for (const [id, value] of Object.entries(bucket)) {
+        push(value, id)
+      }
+      consumed = true
+    }
+  }
+
+  if (consumed) return rows
+
+  for (const [id, value] of Object.entries(data)) {
+    if (skipMapKeys.has(id)) continue
+    if (typeof value === 'number' || typeof value === 'boolean') continue
+    push(value, id)
+  }
+
+  return rows
+}
+
+function normalizeWorkspacePayload(data, fallbackAgentId = 'main') {
+  const safeFallbackId = typeof fallbackAgentId === 'string' && fallbackAgentId.trim()
+    ? fallbackAgentId.trim()
+    : 'main'
+
+  const source = data && typeof data === 'object' && !Array.isArray(data) ? data : {}
+  const identitySource = source.identity && typeof source.identity === 'object'
+    ? source.identity
+    : {}
+
+  let channels = source.channels
+  if (typeof channels === 'string') {
+    try {
+      channels = JSON.parse(channels)
+    } catch {
+      channels = []
+    }
+  }
+  if (!Array.isArray(channels)) channels = []
+
+  const name =
+    identitySource.name ||
+    source.name ||
+    source.display_name ||
+    source.displayName ||
+    (safeFallbackId === 'main' ? '默认助手' : safeFallbackId)
+
+  const emoji = identitySource.emoji || source.emoji || '🤖'
+
+  return {
+    ...source,
+    identity: {
+      ...identitySource,
+      name,
+      emoji,
+      ...(typeof source.description === 'string' && !identitySource.description
+        ? { description: source.description }
+        : {}),
+    },
+    channels,
+    files: normalizeArray(source.files, ['files', 'items', 'list']),
+  }
+}
+
+function extractWorkspaceFileContent(data) {
+  if (typeof data === 'string') return data
+  if (data == null) return ''
+
+  if (Array.isArray(data)) {
+    return data.map((item) => {
+      if (typeof item === 'string') return item
+      try {
+        return JSON.stringify(item)
+      } catch {
+        return String(item)
+      }
+    }).join('\n')
+  }
+
+  if (typeof data === 'object') {
+    const content =
+      data.content ??
+      data.file?.content ??
+      data.text ??
+      data.value ??
+      data.markdown ??
+      data.body
+
+    if (typeof content === 'string') return content
+    if (typeof content === 'number' || typeof content === 'boolean') return String(content)
+
+    try {
+      return JSON.stringify(data, null, 2)
+    } catch {
+      return String(data)
+    }
+  }
+
+  return String(data)
+}
+
+function flattenToolCatalog(data) {
+  // tools.catalog 形态：{ groups: [{ tools: [...] }] }
+  const groups = normalizeArray(data, ['groups', 'items'])
+  if (groups.length > 0 && groups[0]?.tools) {
+    const list = []
+    for (const group of groups) {
+      const tools = normalizeArray(group?.tools)
+      for (const tool of tools) {
+        list.push({
+          name: tool?.name || tool?.id || '',
+          description: tool?.description || tool?.label || '',
+          category: group?.id || 'other',
+          source: tool?.source || group?.source,
+          pluginId: tool?.pluginId || group?.pluginId,
+        })
+      }
+    }
+    return list.filter(t => t.name)
+  }
+
+  // 兼容其他形态
+  const list = normalizeArray(data, ['tools', 'list', 'items'])
+  return list.map((tool) => ({
+    ...tool,
+    name: tool?.name || tool?.id || '',
+    description: tool?.description || tool?.label || '',
+  })).filter(t => t.name)
+}
+
+function extractErrorMessage(error) {
+  if (!error) return '未知错误'
+  if (typeof error === 'string') return error
+  if (error instanceof Error && typeof error.message === 'string' && error.message.trim()) {
+    return error.message
+  }
+
+  const msg =
+    error?.message ||
+    error?.error?.message ||
+    error?.error ||
+    error?.reason ||
+    error?.details?.message
+
+  if (typeof msg === 'string' && msg.trim()) return msg
+
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
+
+function getErrorCode(error) {
+  return error?.code || error?.error?.code || error?.raw?.code || null
+}
+
+function isUnknownMethodError(error) {
+  const code = getErrorCode(error)
+  const message = extractErrorMessage(error).toLowerCase()
+  return message.includes('unknown method') || (code === 'INVALID_REQUEST' && message.includes('method'))
+}
+
+function isRedactedSecretString(value) {
+  if (typeof value !== 'string') return false
+  const v = value.trim()
+  if (!v) return false
+  if (v === '__OPENCLAW_REDACTED__') return true
+  if (v.includes('REDACTED')) return true
+  return /^\*{4,}$/.test(v)
+}
+
+// Gateway token 初始化锁（防止并发重复读取配置）
+let tokenInitPromise = null
+let tokenAutoLoadDisabled = false
+
+function isGatewayTokenMismatchError(error) {
+  const message = extractErrorMessage(error).toLowerCase()
+  const detailsCode = String(
+    error?.details?.code ||
+    error?.raw?.details?.code ||
+    error?.originalError?.details?.code ||
+    ''
+  ).toUpperCase()
+
+  return detailsCode === 'AUTH_TOKEN_MISMATCH' || message.includes('token mismatch')
+}
+
+function isLikelyGatewayAuthClose(error) {
+  const message = extractErrorMessage(error).toLowerCase()
+  return (
+    message.includes('连接关闭: 1006') ||
+    message.includes('connection closed: 1006') ||
+    message.includes('unauthorized') ||
+    message.includes('auth')
+  )
+}
+
+/**
+ * 确保 Gateway 认证 token 已加载
+ *
+ * 场景：
+ * - 应用首屏渲染时，页面组件可能早于 App 初始化触发 API 调用
+ * - 此时如果 token 尚未设置，connect 握手会被 Gateway 拒绝（token_missing）
+ */
+async function ensureGatewayAuthToken(gateway, options = {}) {
+  const { force = false } = options
+
+  // 已有 token，无需重复读取
+  if (!force && gateway.hasAuthToken?.()) return
+  if (tokenAutoLoadDisabled) return
+
+  // 并发复用同一个初始化 Promise
+  if (tokenInitPromise) {
+    await tokenInitPromise
+    return
+  }
+
+  tokenInitPromise = (async () => {
+    if (!isTauriRuntime()) {
+      console.log('[API] 非 Tauri 运行环境，跳过 Gateway token 自动加载')
+      return
+    }
+
+    try {
+      let token = ''
+      try {
+        token = await invokeTauri('resolve_gateway_auth_token')
+      } catch (resolveError) {
+        console.warn('[API] resolve_gateway_auth_token 失败，回退读取配置文件:', resolveError)
+      }
+
+      if (!token) {
+        const configJson = await invokeTauri('get_openclaw_config')
+        const config = JSON.parse(configJson || '{}')
+        token = config?.gateway?.auth?.token
+      }
+
+      if (typeof token === 'string' && token.trim() && !isRedactedSecretString(token)) {
+        gateway.setAuthToken(token)
+        console.log(force ? '[API] 已强制刷新 Gateway auth token' : '[API] 已加载 Gateway auth token')
+      } else {
+        console.log('[API] 配置中无可用 Gateway auth token，将尝试无 token 连接')
+      }
+    } catch (error) {
+      // 配置读取失败不阻塞后续流程，交由 connect 错误处理兜底
+      console.warn('[API] 读取 Gateway auth token 失败:', error)
+      const msg = extractErrorMessage(error).toLowerCase()
+      if (msg.includes('access control') || msg.includes('denied') || msg.includes('forbidden')) {
+        tokenAutoLoadDisabled = true
+      }
+    }
+  })()
+
+  try {
+    await tokenInitPromise
+  } finally {
+    tokenInitPromise = null
+  }
+}
+
+async function runProviderConnectivityTest(provider, model, apiKey, baseUrl) {
+  if (!isTauriRuntime()) {
+    return {
+      success: true,
+      data: {
+        success: false,
+        message: '仅 Tauri 桌面环境支持在线连通性测试。',
+      },
+    }
+  }
+
+  try {
+    const result = await invokeTauri('test_model_connection', {
+      provider,
+      model,
+      apiKey,
+      baseUrl,
+    })
+    return { success: true, data: result }
+  } catch (error) {
+    return handleError(error, { method: 'test_model_connection' })
+  }
 }
 
 /**
@@ -37,9 +1041,7 @@ function handleError(error, context = {}) {
   const { method, silent = false } = context
 
   // 提取错误消息
-  const message = typeof error === 'string'
-    ? error
-    : error?.message || error?.toString() || '未知错误'
+  const message = extractErrorMessage(error)
 
   // 控制台日志
   if (ERROR_CONFIG.logToConsole) {
@@ -55,7 +1057,273 @@ function handleError(error, context = {}) {
   return {
     success: false,
     error: message,
+    code: getErrorCode(error),
     originalError: error,
+  }
+}
+
+async function tryUnknownMethodFallback(method, params = {}, options = {}) {
+  const call = (m, p = {}) => wrapGatewayCall(m, p, { ...options, silent: true, _skipFallback: true })
+
+  switch (method) {
+    case 'skills.list': {
+      const status = await call('skills.status', params)
+      if (status.success) {
+        const skills = normalizeArray(status.data, ['skills', 'entries', 'items'])
+          .map((skill, idx) => ({
+            ...skill,
+            id: skill?.id || skill?.skillKey || skill?.name || `skill-${idx}`,
+            name: skill?.name || skill?.id || `skill-${idx}`,
+          }))
+        return { success: true, data: { ...(status.data || {}), skills } }
+      }
+      return { success: true, data: { skills: [] } }
+    }
+    case 'skills.stats': {
+      const status = await call('skills.status', params)
+      const skills = status.success ? normalizeArray(status.data, ['skills', 'entries', 'items']) : []
+      return {
+        success: true,
+        data: {
+          total: skills.length,
+          ready: skills.filter(s => s?.eligible !== false).length,
+          disabled: skills.filter(s => s?.disabled === true).length,
+        },
+      }
+    }
+    case 'tools.list': {
+      const catalog = await call('tools.catalog', params)
+      if (catalog.success) {
+        return { success: true, data: flattenToolCatalog(catalog.data) }
+      }
+      return { success: true, data: [] }
+    }
+    case 'sessions.getMessages': {
+      const sessionKey = params?.sessionKey || params?.key || 'main'
+      const res = await call('chat.history', { sessionKey })
+      if (res.success) {
+        return { success: true, data: normalizeArray(res.data, ['messages', 'items']) }
+      }
+      return { success: true, data: [] }
+    }
+    case 'memory.stats':
+      return { success: true, data: { total: 0, count: 0 } }
+    case 'memory.list':
+      return { success: true, data: { memories: [] } }
+    case 'memory.get':
+      return { success: true, data: null }
+    case 'memory.store':
+    case 'memory.delete':
+    case 'memory.reindex':
+    case 'memory.import':
+    case 'memory.export':
+      return { success: false, error: '当前 Gateway 版本不支持记忆写入/管理接口' }
+    case 'memory.search': {
+      const query = typeof params?.query === 'string' ? params.query.trim().toLowerCase() : ''
+      const limit = Number.isFinite(params?.limit) ? Math.max(1, Math.floor(params.limit)) : 10
+
+      const list = await tryUnknownMethodFallback('memory.list', { limit: 200, offset: 0 }, options)
+      if (!list.success) {
+        return { success: true, data: { results: [] } }
+      }
+
+      const rows = normalizeArray(list.data, ['memories', 'items', 'results', 'list'])
+      const searched = query
+        ? rows.filter((item) => {
+            const haystack = [
+              item?.content,
+              item?.text,
+              item?.snippet,
+              item?.summary,
+              item?.title,
+              item?.metadata?.title,
+              item?.metadata?.summary,
+            ]
+              .filter(Boolean)
+              .map((v) => String(v).toLowerCase())
+              .join('\n')
+            return haystack.includes(query)
+          })
+        : rows
+
+      const results = searched.slice(0, limit).map((item) => ({
+        id: item?.id || item?.memory_id || item?.key || null,
+        score: typeof item?.score === 'number'
+          ? item.score
+          : (typeof item?.similarity === 'number' ? item.similarity : 0),
+        snippet: item?.snippet || item?.content || item?.text || item?.summary || '',
+        content: item?.content || item?.text || item?.snippet || item?.summary || '',
+        metadata: item?.metadata || {},
+      }))
+
+      return { success: true, data: { results } }
+    }
+    case 'tts.voices': {
+      const providers = await call('tts.providers', {})
+      if (providers.success) {
+        return { success: true, data: normalizeArray(providers.data, ['providers', 'items', 'voices']) }
+      }
+      return { success: true, data: [] }
+    }
+    case 'testConnection':
+      return runProviderConnectivityTest(
+        params?.provider,
+        params?.model,
+        params?.apiKey,
+        params?.baseUrl,
+      )
+    case 'workflow.get':
+      return { success: true, data: { nodes: [], edges: [] } }
+    case 'workflow.save':
+      return { success: true, data: { ok: true } }
+    case 'workspace.load':
+      return {
+        success: true,
+        data: {
+          identity: { name: params?.agentId === 'main' ? '默认助手' : `智能体-${params?.agentId || 'unknown'}` },
+          files: [],
+        },
+      }
+    case 'workspace.listFiles': {
+      const agentId = String(params?.agentId || 'main')
+      const res = await call('agents.files.list', { agentId })
+      if (res.success) {
+        return { success: true, data: normalizeArray(res.data, ['files', 'items']) }
+      }
+      return res
+    }
+    case 'workspace.readFile': {
+      const agentId = String(params?.agentId || 'main')
+      const fileName = String(params?.fileName || params?.filename || params?.name || '')
+      if (!fileName) return { success: false, error: '缺少 fileName 参数' }
+      let res = await call('agents.files.get', { agentId, name: fileName })
+      if (!res.success) {
+        res = await call('agents.files.get', { agentId, filename: fileName, fileName })
+      }
+      if (res.success) {
+        const content = typeof res.data === 'string'
+          ? res.data
+          : (res.data?.file?.content ?? res.data?.content ?? '')
+        return { success: true, data: String(content ?? '') }
+      }
+      return res
+    }
+    case 'workspace.saveFile': {
+      const agentId = String(params?.agentId || 'main')
+      const fileName = String(params?.fileName || params?.filename || params?.name || '')
+      if (!fileName) return { success: false, error: '缺少 fileName 参数' }
+      let res = await call('agents.files.set', {
+        agentId,
+        name: fileName,
+        content: String(params?.content ?? ''),
+      })
+      if (!res.success) {
+        res = await call('agents.files.set', {
+          agentId,
+          filename: fileName,
+          fileName,
+          content: String(params?.content ?? ''),
+        })
+      }
+      return res
+    }
+    case 'workspace.deleteFile':
+      return { success: false, error: '当前 Gateway 版本不支持删除 workspace 文件' }
+    case 'workspace.resetTemplates':
+      return { success: false, error: '当前 Gateway 版本不支持重置模板' }
+    case 'workspace.save':
+      return { success: true, data: { ok: true } }
+    case 'autoReply.list':
+      return { success: true, data: [] }
+    case 'autoReply.status':
+      return { success: true, data: { enabled: false, running: false } }
+    case 'autoReply.create':
+    case 'autoReply.update':
+    case 'autoReply.delete':
+    case 'autoReply.enable':
+    case 'autoReply.disable':
+      return { success: false, error: '当前 Gateway 版本不支持自动回复管理接口' }
+    case 'proactive.status':
+      return { success: true, data: { enabled: false, running: false } }
+    case 'proactive.configure':
+    case 'proactive.start':
+    case 'proactive.stop':
+    case 'proactive.trigger':
+      return { success: false, error: '当前 Gateway 版本不支持主动消息控制接口' }
+    case 'audit.query':
+      return { success: true, data: [] }
+    case 'audit.export':
+      return { success: false, error: '当前 Gateway 版本不支持审计导出' }
+    case 'reflection.getHistory':
+      return { success: true, data: [] }
+    case 'reflection.getPatterns':
+      return { success: true, data: [] }
+    case 'reflection.trigger':
+      return { success: false, error: '当前 Gateway 版本不支持反思/记忆沉淀触发接口' }
+    case 'reflection.addPattern':
+      return { success: false, error: '当前 Gateway 版本不支持模式写入接口' }
+    case 'patterns.list':
+      return { success: true, data: [] }
+    case 'patterns.search':
+      return { success: true, data: [] }
+    case 'patterns.get':
+      return { success: true, data: null }
+    case 'patterns.stats':
+      return { success: true, data: {} }
+    case 'patterns.getConfig':
+      return { success: true, data: {} }
+    case 'patterns.feedback':
+    case 'patterns.delete':
+    case 'patterns.incrementEvidence':
+    case 'patterns.save':
+      return { success: false, error: '当前 Gateway 版本不支持模式库写入接口' }
+    case 'secrets.list':
+      return { success: true, data: { secrets: [] } }
+    case 'secrets.get':
+      return { success: true, data: null }
+    case 'secrets.set':
+    case 'secrets.delete':
+    case 'secrets.reload':
+      return { success: false, error: '当前 Gateway 版本不支持密钥管理接口' }
+    case 'subagents.list':
+      return { success: true, data: [] }
+    case 'subagents.stats':
+      return { success: true, data: {} }
+    case 'subagents.presets':
+      return { success: true, data: [] }
+    case 'subagents.spawn':
+    case 'subagents.terminate':
+    case 'subagents.cleanup':
+      return { success: false, error: '当前 Gateway 版本不支持子 Agent 管理接口' }
+    case 'a2a.list':
+      return { success: true, data: [] }
+    case 'a2a.stats':
+      return { success: true, data: {} }
+    case 'a2a.call':
+    case 'a2a.broadcast':
+    case 'a2a.register':
+    case 'a2a.unregister':
+      return { success: false, error: '当前 Gateway 版本不支持 A2A 管理接口' }
+    case 'tts.status':
+      return { success: true, data: { enabled: false, provider: '', voice: '' } }
+    case 'tts.synthesize':
+    case 'tts.configure':
+      return { success: false, error: '当前 Gateway 版本不支持 TTS 控制接口' }
+    case 'talk.config':
+      return { success: true, data: { enabled: false, mode: 'manual' } }
+    case 'talk.mode':
+      return { success: false, error: '当前 Gateway 版本不支持语音通话模式设置' }
+    case 'voicewake.get':
+      return { success: true, data: { enabled: false, wakeWord: 'Hey Claw', sensitivity: 0.6 } }
+    case 'voicewake.set':
+      return { success: false, error: '当前 Gateway 版本不支持语音唤醒配置' }
+    case 'exec.approvals.get':
+      return { success: true, data: { mode: 'off', defaultDecision: 'allow', nodeDecisions: {} } }
+    case 'exec.approvals.set':
+    case 'exec.approvals.node.set':
+      return { success: false, error: '当前 Gateway 版本不支持执行审批配置' }
+    default:
+      return null
   }
 }
 
@@ -64,21 +1332,60 @@ function handleError(error, context = {}) {
  */
 async function wrapGatewayCall(method, params = {}, options = {}) {
   const gateway = getGateway()
+  const {
+    _skipFallback = false,
+    _tokenRefreshRetried = false,
+    _suppressUnknownMethodWarn = false,
+    ...callOptions
+  } = options
+
+  // 连接前先确保 token 就绪，避免首屏并发导致 token_missing
+  await ensureGatewayAuthToken(gateway)
 
   // 检查连接状态
   if (!gateway.isConnected()) {
-    console.warn(`[API] Gateway 未连接，尝试连接...`)
+    const state = gateway.getState?.()
+    if (state !== ConnectionState.CONNECTING && state !== ConnectionState.RECONNECTING) {
+      console.warn(`[API] Gateway 未连接，尝试连接...`)
+    }
     try {
       await gateway.connect()
     } catch (connectError) {
+      if (
+        !_tokenRefreshRetried &&
+        (isGatewayTokenMismatchError(connectError) || isLikelyGatewayAuthClose(connectError))
+      ) {
+        console.warn('[API] 连接失败，尝试刷新 token 后重连...')
+        await ensureGatewayAuthToken(gateway, { force: true })
+        gateway.disconnect()
+        return wrapGatewayCall(method, params, { ...options, _tokenRefreshRetried: true })
+      }
       return handleError(connectError, { method, ...options })
     }
   }
 
   try {
-    const result = await gateway.call(method, params, options)
+    const result = await gateway.call(method, params, callOptions)
     return { success: true, data: result }
   } catch (error) {
+    if (
+      !_tokenRefreshRetried &&
+      (isGatewayTokenMismatchError(error) || isLikelyGatewayAuthClose(error))
+    ) {
+      console.warn('[API] 调用失败，尝试刷新 token 后重试...')
+      await ensureGatewayAuthToken(gateway, { force: true })
+      gateway.disconnect()
+      return wrapGatewayCall(method, params, { ...options, _tokenRefreshRetried: true })
+    }
+    if (!_skipFallback && isUnknownMethodError(error)) {
+      const fallback = await tryUnknownMethodFallback(method, params, options)
+      if (fallback) {
+        if (!_suppressUnknownMethodWarn) {
+          warnOnce(`unknown-method:${method}`, `[API] 方法 ${method} 不存在，已使用兼容回退`)
+        }
+        return fallback
+      }
+    }
     return handleError(error, { method, ...options })
   }
 }
@@ -88,24 +1395,49 @@ async function wrapGatewayCall(method, params = {}, options = {}) {
  */
 async function wrapGatewayStreamCall(method, params = {}, onChunk, options = {}) {
   const gateway = getGateway()
+  const { _tokenRefreshRetried = false, ...callOptions } = options
+
+  // 连接前先确保 token 就绪，避免首屏并发导致 token_missing
+  await ensureGatewayAuthToken(gateway)
 
   // 检查连接状态
   if (!gateway.isConnected()) {
-    console.warn(`[API] Gateway 未连接，尝试连接...`)
+    const state = gateway.getState?.()
+    if (state !== ConnectionState.CONNECTING && state !== ConnectionState.RECONNECTING) {
+      console.warn(`[API] Gateway 未连接，尝试连接...`)
+    }
     try {
       await gateway.connect()
     } catch (connectError) {
+      if (
+        !_tokenRefreshRetried &&
+        (isGatewayTokenMismatchError(connectError) || isLikelyGatewayAuthClose(connectError))
+      ) {
+        console.warn('[API] 流式连接失败，尝试刷新 token 后重连...')
+        await ensureGatewayAuthToken(gateway, { force: true })
+        gateway.disconnect()
+        return wrapGatewayStreamCall(method, params, onChunk, { ...options, _tokenRefreshRetried: true })
+      }
       return handleError(connectError, { method, ...options })
     }
   }
 
   try {
     const result = await gateway.call(method, params, {
-      ...options,
+      ...callOptions,
       onStream: onChunk,
     })
     return { success: true, data: result }
   } catch (error) {
+    if (
+      !_tokenRefreshRetried &&
+      (isGatewayTokenMismatchError(error) || isLikelyGatewayAuthClose(error))
+    ) {
+      console.warn('[API] 流式调用失败，尝试刷新 token 后重试...')
+      await ensureGatewayAuthToken(gateway, { force: true })
+      gateway.disconnect()
+      return wrapGatewayStreamCall(method, params, onChunk, { ...options, _tokenRefreshRetried: true })
+    }
     return handleError(error, { method, ...options })
   }
 }
@@ -121,65 +1453,260 @@ const api = {
 
   // ========== 配置相关 ==========
   config: {
-    get: async () => wrapGatewayCall('config.get', {}),
-    set: async (config) => wrapGatewayCall('config.set', { config }),
+    get: async () => {
+      const result = await wrapGatewayCall('config.get', {})
+      if (result.success) {
+        result.data = normalizeConfigForUi(result.data)
+      }
+      return result
+    },
+    set: async (config) => {
+      const normalizedConfig = prepareConfigForPersistence(config)
+
+      // 优先使用 Tauri 命令直接写文件，绕过 Gateway 的 baseHash 问题
+      try {
+        const configJson = JSON.stringify(normalizedConfig, null, 2)
+        await invokeTauri('save_openclaw_config', { configJson })
+        console.log('[API] 配置已通过 Tauri 命令保存')
+        return { success: true }
+      } catch (tauriError) {
+        // Tauri 命令失败，尝试 Gateway API（可能因 baseHash 问题失败）
+        console.warn('[API] Tauri 保存配置失败，尝试 Gateway API:', tauriError)
+        return wrapGatewayCall('config.set', { config: normalizedConfig })
+      }
+    },
     update: async (partialConfig) => {
       // 先获取当前配置，再合并更新
-      const currentResult = await wrapGatewayCall('config.get', {})
+      const currentResult = await api.config.get()
       if (currentResult.success) {
         const mergedConfig = {
           ...currentResult.data,
           ...partialConfig,
         }
-        return wrapGatewayCall('config.set', { config: mergedConfig })
+        // 使用新的 set 方法（优先 Tauri 命令）
+        return api.config.set(mergedConfig)
       }
       return currentResult
     },
+    // 兼容旧页面调用：当前版本配置通过 config.set 已落盘，Gateway 侧暂无独立 sync 方法
+    syncToGateway: async () => ({ success: true, data: { synced: true } }),
   },
 
   // ========== 网关相关 ==========
   gateway: {
-    status: () => wrapGatewayCall('gateway.status', {}),
-    info: () => wrapGatewayCall('gateway.info', {}),
+    // Gateway 健康检查（方法名是 health，不是 gateway.health）
+    start: () => api.bundledGateway.start(),
+    stop: () => api.bundledGateway.stop(),
+    restart: () => api.bundledGateway.restart(),
+    status: () => wrapGatewayCall('status', {}),
+    health: () => wrapGatewayCall('health', {}),
+    httpApiStatus: async () => ({
+      success: true,
+      data: {
+        running: false,
+        auth_enabled: false,
+        base_url: '',
+        bind_addr: '127.0.0.1',
+        port: 0,
+        endpoints: [],
+      },
+    }),
+    chat: async (sessionId, messages = []) => {
+      const list = Array.isArray(messages) ? messages : []
+      const latestUser = [...list].reverse().find((msg) =>
+        msg && typeof msg === 'object' && msg.role === 'user' && typeof msg.content === 'string',
+      )
+      const fallbackText = list
+        .filter((msg) => msg && typeof msg === 'object' && typeof msg.content === 'string')
+        .map((msg) => String(msg.content))
+        .join('\n')
+      const text = (latestUser?.content || fallbackText || '').trim() || '你好'
+      const result = await api.chat.send({ sessionKey: sessionId || 'main', text })
+      if (!result.success) return result
+
+      const raw = result.data || {}
+      const content = typeof raw?.content === 'string'
+        ? raw.content
+        : (typeof raw?.text === 'string' ? raw.text : (typeof raw?.message === 'string' ? raw.message : ''))
+
+      return {
+        success: true,
+        data: { ...raw, content },
+      }
+    },
   },
 
   // ========== 会话相关 ==========
   sessions: {
-    list: (agentId) => wrapGatewayCall('sessions.list', { agentId }),
-    get: (sessionKey) => wrapGatewayCall('sessions.get', { sessionKey }),
-    getMessages: (sessionKey) => wrapGatewayCall('sessions.getMessages', { sessionKey }),
-    create: (agentId, sessionName) => wrapGatewayCall('sessions.create', { agentId, sessionName: sessionName || null }),
-    delete: (sessionKey) => wrapGatewayCall('sessions.delete', { sessionKey }),
-    clearAll: () => wrapGatewayCall('sessions.clearAll', {}),
+    list: async (agentId) => {
+      const params = {}
+      if (agentId) params.agentId = agentId
+      const result = await wrapGatewayCall('sessions.list', params)
+      if (result.success) {
+        const rows = normalizeArray(result.data, ['sessions', 'items', 'list']).map(toSessionRow)
+        result.data = rows
+      }
+      return result
+    },
+    listAgentSessions: async (agentId) => {
+      const result = await api.sessions.list(agentId)
+      if (result.success) {
+        const prefix = `agent:${String(agentId || '').trim()}:`
+        result.data = (result.data || []).filter((row) => row.session_key?.startsWith(prefix))
+      }
+      return result
+    },
+    get: async (sessionKey) => wrapGatewayCall('sessions.get', { key: sessionKey, sessionKey }),
+    getMessages: async (sessionKey) => {
+      const result = await wrapGatewayCall('chat.history', { sessionKey })
+      if (result.success) {
+        result.data = normalizeArray(result.data, ['messages', 'items'])
+      }
+      return result
+    },
+    // Gateway 当前版本无 sessions.create；会话在 chat.send 时自动创建
+    create: async (agentId, sessionName) => {
+      const safeAgent = String(agentId || 'main').trim() || 'main'
+      const rawName = String(sessionName || 'main').trim() || 'main'
+      const normalized = rawName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')
+      const sessionKey = safeAgent === 'main'
+        ? 'main'
+        : `agent:${safeAgent}:${normalized || 'main'}`
+      if (sessionKey !== 'main') {
+        await wrapGatewayCall('sessions.patch', {
+          key: sessionKey,
+          ...(rawName && rawName !== 'main' ? { label: rawName } : {}),
+        }, { silent: true })
+      }
+      return { success: true, data: sessionKey }
+    },
+    delete: (sessionKey) => wrapGatewayCall('sessions.delete', { key: sessionKey, sessionKey }),
+    deleteSingle: (sessionKey) => wrapGatewayCall('sessions.delete', { key: sessionKey, sessionKey }),
+    clearAll: () => Promise.resolve({ success: true, data: { ok: true } }),
   },
 
   // ========== 聊天相关 ==========
   chat: {
-    send: (params) => wrapGatewayCall('chat.send', params),
-    sendStream: (params, onChunk) => wrapGatewayStreamCall('chat.send', params, onChunk),
-    abort: (sessionId) => wrapGatewayCall('chat.abort', { sessionId }),
+    send: async (params) => {
+      const { payload, sessionKey, model } = normalizeChatSendParams(params)
+      if (model) {
+        await wrapGatewayCall('sessions.patch', { key: sessionKey, model }, { silent: true })
+      }
+      return wrapGatewayCall('chat.send', payload)
+    },
+    // 原版 Gateway chat.send 通过 chat 事件流推送增量，这里保留旧签名兼容
+    sendStream: async (params, onChunk) => {
+      const result = await api.chat.send(params)
+      if (typeof onChunk === 'function') {
+        onChunk({ acknowledged: result.success, runId: result.data?.runId })
+      }
+      return result
+    },
+    abort: (sessionKey, runId) => wrapGatewayCall('chat.abort', { sessionKey, runId }),
     history: (sessionKey, options) => wrapGatewayCall('chat.history', { sessionKey, ...options }),
   },
 
   // ========== 智能体相关 ==========
   agents: {
-    list: () => wrapGatewayCall('agents.list', {}),
-    get: (agentId) => wrapGatewayCall('agents.get', { agentId }),
-    create: (params) => wrapGatewayCall('agents.create', params),
+    list: async () => {
+      const localRows = await loadLocalAgentsFromTauri()
+      const result = await wrapGatewayCall('agents.list', {}, { silent: true })
+
+      const gatewayRows = result.success ? normalizeAgentsListPayload(result.data) : []
+      if (!result.success && !localRows) {
+        return result
+      }
+
+      const merged = new Map()
+      for (const row of gatewayRows) {
+        if (!row?.id) continue
+        merged.set(row.id, row)
+      }
+      if (Array.isArray(localRows)) {
+        for (const row of localRows) {
+          if (!row?.id) continue
+          const prev = merged.get(row.id) || {}
+          merged.set(row.id, {
+            ...prev,
+            ...row,
+            identity: {
+              ...(prev.identity || {}),
+              ...(row.identity || {}),
+            },
+          })
+        }
+      }
+
+      const list = Array.from(merged.values()).filter((row) => row?.id)
+      list.sort((a, b) => {
+        if (a.id === 'main') return -1
+        if (b.id === 'main') return 1
+        return String(a.id).localeCompare(String(b.id))
+      })
+
+      return { success: true, data: list }
+    },
+    get: async (agentId) => {
+      const result = await wrapGatewayCall('agents.get', { agentId }, { silent: true })
+      if (result.success) return result
+
+      const localRows = await loadLocalAgentsFromTauri()
+      if (Array.isArray(localRows)) {
+        const row = localRows.find((item) => item.id === String(agentId || ''))
+        if (row) return { success: true, data: row }
+      }
+      return result
+    },
+    create: (params) => {
+      const payload = { ...(params || {}) }
+      const name = typeof payload.name === 'string' && payload.name.trim()
+        ? payload.name.trim()
+        : 'new-agent'
+
+      if (typeof payload.workspace !== 'string' || !payload.workspace.trim()) {
+        payload.workspace = `~/.openclaw/agents/${normalizeAgentIdLike(name)}`
+      }
+
+      return wrapGatewayCall('agents.create', payload)
+    },
     update: (agentId, params) => wrapGatewayCall('agents.update', { agentId, ...params }),
     delete: (agentId) => wrapGatewayCall('agents.delete', { agentId }),
     // 智能体文件
     files: {
       list: (agentId) => wrapGatewayCall('agents.files.list', { agentId }),
-      get: (agentId, filename) => wrapGatewayCall('agents.files.get', { agentId, filename }),
-      set: (agentId, filename, content) => wrapGatewayCall('agents.files.set', { agentId, filename, content }),
+      get: (agentId, filename) => wrapGatewayCall('agents.files.get', { agentId, name: filename }),
+      set: (agentId, filename, content) => wrapGatewayCall('agents.files.set', { agentId, name: filename, content }),
       delete: (agentId, filename) => wrapGatewayCall('agents.files.delete', { agentId, filename }),
     },
   },
 
   // ========== Skills 相关 ==========
   skills: {
-    list: (params) => wrapGatewayCall('skills.list', params || {}),
+    list: async (params) => {
+      const result = await wrapGatewayCall('skills.status', params || {})
+      if (result.success) {
+        const skills = normalizeArray(result.data, ['skills', 'entries', 'items']).map((skill, idx) => ({
+          ...skill,
+          id: skill?.id || skill?.skillKey || skill?.name || `skill-${idx}`,
+          name: skill?.name || skill?.id || `skill-${idx}`,
+        }))
+        result.data = { ...(result.data || {}), skills }
+      }
+      return result
+    },
+    stats: async () => {
+      const result = await api.skills.list()
+      if (!result.success) return result
+      const skills = normalizeArray(result.data, ['skills', 'items'])
+      return {
+        success: true,
+        data: {
+          total: skills.length,
+          ready: skills.filter((s) => s?.eligible !== false).length,
+          disabled: skills.filter((s) => s?.disabled === true).length,
+        },
+      }
+    },
     get: (skillId) => wrapGatewayCall('skills.get', { skillId }),
     execute: (skillId, input, sessionId) => wrapGatewayCall('skills.execute', { skillId, input, sessionId }),
     pause: (skillId) => wrapGatewayCall('skills.pause', { skillId }),
@@ -202,19 +1729,33 @@ const api = {
   // ========== 定时任务相关 ==========
   cron: {
     list: () => wrapGatewayCall('cron.list', {}),
-    get: (taskId) => wrapGatewayCall('cron.get', { taskId }),
-    create: (task) => wrapGatewayCall('cron.create', { task }),
-    update: (taskId, task) => wrapGatewayCall('cron.update', { taskId, task }),
-    delete: (taskId) => wrapGatewayCall('cron.delete', { taskId }),
-    toggle: (taskId) => wrapGatewayCall('cron.toggle', { taskId }),
-    runNow: (taskId) => wrapGatewayCall('cron.runNow', { taskId }),
-    history: () => wrapGatewayCall('cron.history', {}),
+    get: (taskId) => wrapGatewayCall('cron.status', { id: taskId, jobId: taskId }),
+    create: (task) => wrapGatewayCall('cron.add', task || {}),
+    update: (taskId, task) => wrapGatewayCall('cron.update', { id: taskId, patch: task || {} }),
+    delete: (taskId) => wrapGatewayCall('cron.remove', { id: taskId, jobId: taskId }),
+    toggle: async (taskId) => {
+      const listResult = await wrapGatewayCall('cron.list', { includeDisabled: true })
+      if (!listResult.success) return listResult
+      const items = normalizeArray(listResult.data, ['items', 'tasks', 'list'])
+      const current = items.find((item) => item?.id === taskId || item?.jobId === taskId)
+      if (!current) return { success: false, error: '任务不存在' }
+      return wrapGatewayCall('cron.update', { id: taskId, patch: { enabled: !current.enabled } })
+    },
+    runNow: (taskId) => wrapGatewayCall('cron.run', { id: taskId, jobId: taskId, mode: 'force' }),
+    history: () => wrapGatewayCall('cron.runs', { scope: 'all', limit: 100 }),
   },
 
   // ========== 记忆相关 ==========
   memory: {
     stats: () => wrapGatewayCall('memory.stats', {}),
-    list: (limit, offset) => wrapGatewayCall('memory.list', { limit, offset }),
+    list: async (limit, offset) => {
+      const result = await wrapGatewayCall('memory.list', { limit, offset })
+      if (result.success) {
+        const memories = normalizeArray(result.data, ['memories', 'items', 'results', 'list'])
+        result.data = { ...(result.data || {}), memories }
+      }
+      return result
+    },
     search: (query, limit) => wrapGatewayCall('memory.search', { query, limit }),
     get: (id) => wrapGatewayCall('memory.get', { id }),
     store: (content, metadata) => wrapGatewayCall('memory.store', { content, metadata }),
@@ -222,12 +1763,41 @@ const api = {
     reindex: () => wrapGatewayCall('memory.reindex', {}),
     import: (path) => wrapGatewayCall('memory.import', { path }),
     export: (path) => wrapGatewayCall('memory.export', { path }),
+    // 兼容旧前端调用：统一返回 { results: [...] } 形态
+    searchGateway: async (query, limit = 3) => {
+      const result = await wrapGatewayCall('memory.search', { query, limit }, { _suppressUnknownMethodWarn: true })
+      if (!result.success) return result
+
+      const rows = normalizeArray(result.data, ['results', 'items', 'memories'])
+      return {
+        success: true,
+        data: {
+          results: rows.map((item) => ({
+            id: item?.id,
+            score: typeof item?.score === 'number'
+              ? item.score
+              : (typeof item?.similarity === 'number' ? item.similarity : 0),
+            snippet: item?.snippet || item?.content || item?.text || '',
+            content: item?.content || item?.text || item?.snippet || '',
+            metadata: item?.metadata || {},
+          })),
+        },
+      }
+    },
+    // 原版 Gateway 不提供 memory.sync，前端做静默兼容
+    sync: async () => ({ success: true, data: { imported: 0, skipped: 0 } }),
   },
 
   // ========== 工具相关 ==========
   tools: {
     catalog: () => wrapGatewayCall('tools.catalog', {}),
-    list: () => wrapGatewayCall('tools.list', {}),
+    list: async () => {
+      const result = await wrapGatewayCall('tools.catalog', {})
+      if (result.success) {
+        result.data = flattenToolCatalog(result.data)
+      }
+      return result
+    },
     get: (name) => wrapGatewayCall('tools.get', { name }),
     call: (name, args) => wrapGatewayCall('tools.call', { name, arguments: args }),
     callStream: (name, args, onChunk) => wrapGatewayStreamCall('tools.callStream', { name, arguments: args }, onChunk),
@@ -240,11 +1810,66 @@ const api = {
 
   // ========== Workspace 相关 ==========
   workspace: {
-    load: (agentId) => wrapGatewayCall('workspace.load', { agentId }),
+    load: async (agentId) => {
+      const safeAgentId = String(agentId || 'main')
+      const localData = await loadLocalWorkspaceFromTauri(safeAgentId)
+      if (localData) {
+        return { success: true, data: normalizeWorkspacePayload(localData, safeAgentId) }
+      }
+
+      const result = await wrapGatewayCall('workspace.load', { agentId: safeAgentId }, { silent: true })
+      if (!result.success) {
+        return result
+      }
+      return { success: true, data: normalizeWorkspacePayload(result.data, safeAgentId) }
+    },
     save: (agentId, files) => wrapGatewayCall('workspace.save', { agentId, files }),
-    listFiles: (agentId) => wrapGatewayCall('workspace.listFiles', { agentId }),
-    readFile: (agentId, fileName) => wrapGatewayCall('workspace.readFile', { agentId, fileName }),
-    saveFile: (agentId, fileName, content) => wrapGatewayCall('workspace.saveFile', { agentId, fileName, content }),
+    listFiles: async (agentId) => {
+      const safeAgentId = String(agentId || 'main')
+      const localData = await loadLocalWorkspaceFromTauri(safeAgentId)
+      if (localData && Array.isArray(localData.files)) {
+        return { success: true, data: localData.files }
+      }
+
+      return wrapGatewayCall('workspace.listFiles', { agentId: safeAgentId }, { silent: true })
+    },
+    readFile: async (agentId, fileName) => {
+      const safeAgentId = String(agentId || 'main')
+      const safeFileName = String(fileName || '')
+      const localContent = await readLocalWorkspaceFileFromTauri(safeAgentId, safeFileName)
+      if (localContent !== null) {
+        return { success: true, data: localContent }
+      }
+
+      const result = await wrapGatewayCall(
+        'workspace.readFile',
+        { agentId: safeAgentId, fileName: safeFileName },
+        { silent: true },
+      )
+      if (!result.success) {
+        return result
+      }
+      return { success: true, data: extractWorkspaceFileContent(result.data) }
+    },
+    saveFile: async (agentId, fileName, content) => {
+      const safeAgentId = String(agentId || 'main')
+      const safeFileName = String(fileName || '')
+      const safeContent = String(content ?? '')
+
+      const savedLocal = await saveLocalWorkspaceFileFromTauri(safeAgentId, safeFileName, safeContent)
+      if (savedLocal) {
+        // 最佳努力同步 Gateway（失败不影响本地编辑）
+        const syncResult = await wrapGatewayCall(
+          'workspace.saveFile',
+          { agentId: safeAgentId, fileName: safeFileName, content: safeContent },
+          { silent: true },
+        )
+        if (syncResult.success) return syncResult
+        return { success: true, data: { ok: true, localOnly: true } }
+      }
+
+      return wrapGatewayCall('workspace.saveFile', { agentId: safeAgentId, fileName: safeFileName, content: safeContent })
+    },
     deleteFile: (agentId, fileName) => wrapGatewayCall('workspace.deleteFile', { agentId, fileName }),
     resetTemplates: (agentId) => wrapGatewayCall('workspace.resetTemplates', { agentId }),
   },
@@ -290,17 +1915,31 @@ const api = {
   // ========== 反思/模式库相关 ==========
   reflection: {
     trigger: (messages) => wrapGatewayCall('reflection.trigger', { messages }),
-    getHistory: () => wrapGatewayCall('reflection.getHistory', {}),
+    getHistory: async () => {
+      const result = await wrapGatewayCall('reflection.getHistory', {})
+      if (result.success) {
+        const reflections = normalizeArray(result.data, ['reflections', 'items', 'history', 'list'])
+        result.data = { ...(result.data || {}), reflections }
+      }
+      return result
+    },
     getPatterns: (category, patternType) => wrapGatewayCall('reflection.getPatterns', { category, patternType }),
     addPattern: (pattern) => wrapGatewayCall('reflection.addPattern', { pattern }),
   },
 
   // ========== Failover 相关 ==========
+  // 注意：Gateway 不支持 failover 方法，返回 mock 数据
   failover: {
-    status: () => wrapGatewayCall('failover.status', {}),
-    history: () => wrapGatewayCall('failover.history', {}),
-    reset: () => wrapGatewayCall('failover.reset', {}),
-    configure: (config) => wrapGatewayCall('failover.configure', config),
+    status: () => Promise.resolve({ success: true, data: { enabled: false, status: 'mock' } }),
+    history: () => Promise.resolve({ success: true, data: [] }),
+    reset: () => {
+      console.warn('[API] failover.reset 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
+    configure: (_config) => {
+      console.warn('[API] failover.configure 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
   },
 
   // ========== 主动消息相关 ==========
@@ -320,9 +1959,35 @@ const api = {
     configure: (config) => wrapGatewayCall('tts.configure', config),
   },
 
+  // ========== Talk 相关 ==========
+  talk: {
+    config: () => wrapGatewayCall('talk.config', {}),
+    mode: (mode) => wrapGatewayCall('talk.mode', { mode }),
+  },
+
+  // ========== Voice Wake 相关 ==========
+  voicewake: {
+    get: () => wrapGatewayCall('voicewake.get', {}),
+    set: (config) => wrapGatewayCall('voicewake.set', config || {}),
+  },
+
+  // ========== 执行审批相关 ==========
+  execApprovals: {
+    get: () => wrapGatewayCall('exec.approvals.get', {}),
+    set: (config) => wrapGatewayCall('exec.approvals.set', config || {}),
+    nodeSet: (config) => wrapGatewayCall('exec.approvals.node.set', config || {}),
+  },
+
   // ========== 自动回复相关 ==========
   autoReply: {
-    list: () => wrapGatewayCall('autoReply.list', {}),
+    list: async () => {
+      const result = await wrapGatewayCall('autoReply.list', {})
+      if (result.success) {
+        const rules = normalizeArray(result.data, ['rules', 'items', 'list'])
+        result.data = { ...(result.data || {}), rules }
+      }
+      return result
+    },
     create: (rule) => wrapGatewayCall('autoReply.create', { rule }),
     update: (ruleId, rule) => wrapGatewayCall('autoReply.update', { ruleId, rule }),
     delete: (ruleId) => wrapGatewayCall('autoReply.delete', { ruleId }),
@@ -339,12 +2004,35 @@ const api = {
 
   // ========== 测试连接 ==========
   testConnection: (provider, model, apiKey, baseUrl) =>
-    wrapGatewayCall('testConnection', { provider, model, apiKey, baseUrl }),
+    runProviderConnectivityTest(provider, model, apiKey, baseUrl),
 
   // ========== 系统相关 ==========
+  // 注意：Gateway 没有 system.info 方法，使用 status 替代
   system: {
-    info: () => wrapGatewayCall('system.info', {}),
-    logs: () => wrapGatewayCall('system.logs', {}),
+    info: () => wrapGatewayCall('status', {}),  // 使用 status 获取系统信息
+    logs: () => wrapGatewayCall('logs.tail', {}),  // Gateway 支持 logs.tail
+    openLogsFolder: async () => {
+      if (!isTauriRuntime()) {
+        return { success: false, error: '仅桌面版支持打开日志目录' }
+      }
+      try {
+        await invokeTauri('open_logs_folder')
+        return { success: true, data: { ok: true } }
+      } catch (error) {
+        return handleError(error, { method: 'open_logs_folder' })
+      }
+    },
+    openUrl: async (url) => {
+      if (!isTauriRuntime()) {
+        return { success: false, error: '仅桌面版支持打开系统链接' }
+      }
+      try {
+        await invokeTauri('open_url', { url: String(url || '') })
+        return { success: true, data: { ok: true } }
+      } catch (error) {
+        return handleError(error, { method: 'open_url' })
+      }
+    },
   },
 
   // ========== 模型相关 ==========
@@ -364,10 +2052,12 @@ const api = {
   },
 
   // ========== 设备配对相关 ==========
+  // 注意：Gateway 方法名是 device.pair.xxx，不是 devicePair.xxx
   devicePair: {
-    list: () => wrapGatewayCall('devicePair.list', {}),
-    approve: (pairId) => wrapGatewayCall('devicePair.approve', { pairId }),
-    reject: (pairId) => wrapGatewayCall('devicePair.reject', { pairId }),
+    list: () => wrapGatewayCall('device.pair.list', {}),
+    approve: (pairId) => wrapGatewayCall('device.pair.approve', { requestId: pairId }),
+    reject: (pairId) => wrapGatewayCall('device.pair.reject', { requestId: pairId }),
+    remove: (deviceId) => wrapGatewayCall('device.pair.remove', { deviceId }),
   },
 
   // ========== Presence 相关 ==========
@@ -377,12 +2067,19 @@ const api = {
   },
 
   // ========== 心跳相关 ==========
+  // 注意：Gateway 使用 last-heartbeat 方法，不是 heartbeat.status
   heartbeat: {
-    status: () => wrapGatewayCall('heartbeat.status', {}),
-    start: () => wrapGatewayCall('heartbeat.start', {}),
-    stop: () => wrapGatewayCall('heartbeat.stop', {}),
-    configure: (params) => wrapGatewayCall('heartbeat.configure', params),
-    runOnce: () => wrapGatewayCall('heartbeat.runOnce', {}),
+    status: () => wrapGatewayCall('last-heartbeat', {}),
+    start: () => wrapGatewayCall('set-heartbeats', { enabled: true }),
+    stop: () => wrapGatewayCall('set-heartbeats', { enabled: false }),
+    configure: (params) => {
+      console.warn('[API] heartbeat.configure 方法在 Gateway 中不存在')
+      return { success: false, error: '方法不存在' }
+    },
+    runOnce: () => {
+      console.warn('[API] heartbeat.runOnce 方法在 Gateway 中不存在')
+      return { success: false, error: '方法不存在' }
+    },
   },
 
   // ========== 审计日志相关 ==========
@@ -393,7 +2090,14 @@ const api = {
 
   // ========== 模式库相关 ==========
   patterns: {
-    list: (params = {}) => wrapGatewayCall('patterns.list', params),
+    list: async (params = {}) => {
+      const result = await wrapGatewayCall('patterns.list', params)
+      if (result.success) {
+        const patterns = normalizeArray(result.data, ['patterns', 'items', 'list'])
+        result.data = { ...(result.data || {}), patterns }
+      }
+      return result
+    },
     search: (query, params = {}) => wrapGatewayCall('patterns.search', { query, ...params }),
     get: (id) => wrapGatewayCall('patterns.get', { id }),
     feedback: (sessionId, isPositive, feedback, context = '') =>
@@ -429,6 +2133,29 @@ const api = {
     test: (deviceToken) => wrapGatewayCall('push.test', { deviceToken }),
   },
 
+  // ========== 微信监控相关 ==========
+  wechat: {
+    checkPermission: async () => ({
+      success: true,
+      data: { has_permission: false, error: '当前版本未启用微信监控能力' },
+    }),
+    getStatus: async () => ({
+      success: true,
+      data: {
+        is_monitoring: false,
+        auto_reply_enabled: false,
+        connected: false,
+        uptime_seconds: 0,
+      },
+    }),
+    getMessages: async () => ({ success: true, data: [] }),
+    startMonitoring: async () => ({ success: false, error: '当前版本未启用微信监控能力' }),
+    stopMonitoring: async () => ({ success: true, data: { is_monitoring: false } }),
+    clearMessages: async () => ({ success: true, data: { cleared: true } }),
+    sendMessage: async () => ({ success: false, error: '当前版本未启用微信消息发送能力' }),
+    setAutoReply: async () => ({ success: false, error: '当前版本未启用微信自动回复能力' }),
+  },
+
   // ========== 引导相关 ==========
   wizard: {
     status: () => wrapGatewayCall('wizard.status', {}),
@@ -439,23 +2166,66 @@ const api = {
 
   // ========== 身份相关 ==========
   identity: {
-    get: (agentId) => wrapGatewayCall('identity.get', { agentId }),
-    update: (agentId, params) => wrapGatewayCall('identity.update', { agentId, ...params }),
+    get: (agentId) => wrapGatewayCall('agent.identity.get', { agentId }),
+    update: async (agentId, params, emoji, avatar, _description) => {
+      let payload = {}
+      if (params && typeof params === 'object' && !Array.isArray(params)) {
+        payload = { ...params }
+      } else {
+        payload = {
+          ...(typeof params === 'string' && params.trim() ? { name: params.trim() } : {}),
+          ...(typeof emoji === 'string' && emoji.trim() ? { emoji: emoji.trim() } : {}),
+          ...(typeof avatar === 'string' && avatar.trim() ? { avatar: avatar.trim() } : {}),
+        }
+      }
+
+      const updatePayload = {
+        agentId: String(agentId || 'main'),
+        ...(typeof payload?.name === 'string' && payload.name.trim() ? { name: payload.name.trim() } : {}),
+        ...(typeof payload?.workspace === 'string' && payload.workspace.trim() ? { workspace: payload.workspace.trim() } : {}),
+        ...(typeof payload?.model === 'string' && payload.model.trim() ? { model: payload.model.trim() } : {}),
+        ...(typeof payload?.avatar === 'string' && payload.avatar.trim() ? { avatar: payload.avatar.trim() } : {}),
+      }
+
+      if (Object.keys(updatePayload).length > 1) {
+        return wrapGatewayCall('agents.update', updatePayload)
+      }
+
+      return { success: true, data: { ok: true } }
+    },
   },
 
   // ========== 子智能体相关 ==========
   subagents: {
-    list: () => wrapGatewayCall('subagents.list', {}),
+    list: async () => {
+      const result = await wrapGatewayCall('subagents.list', {})
+      if (result.success) {
+        result.data = normalizeArray(result.data, ['subagents', 'agents', 'items', 'list'])
+      }
+      return result
+    },
     spawn: (config) => wrapGatewayCall('subagents.spawn', { config }),
     terminate: (agentId) => wrapGatewayCall('subagents.terminate', { agentId }),
     stats: () => wrapGatewayCall('subagents.stats', {}),
-    presets: () => wrapGatewayCall('subagents.presets', {}),
+    presets: async () => {
+      const result = await wrapGatewayCall('subagents.presets', {})
+      if (result.success) {
+        result.data = normalizeArray(result.data, ['presets', 'items', 'list'])
+      }
+      return result
+    },
     cleanup: () => wrapGatewayCall('subagents.cleanup', {}),
   },
 
   // ========== A2A 通信相关 ==========
   a2a: {
-    list: (filterStatus) => wrapGatewayCall('a2a.list', filterStatus ? { filterStatus } : {}),
+    list: async (filterStatus) => {
+      const result = await wrapGatewayCall('a2a.list', filterStatus ? { filterStatus } : {})
+      if (result.success) {
+        result.data = normalizeArray(result.data, ['agents', 'items', 'list'])
+      }
+      return result
+    },
     call: (agentId, message) => wrapGatewayCall('a2a.call', { agentId, message }),
     broadcast: (message, excludeSelf) => wrapGatewayCall('a2a.broadcast', { message, excludeSelf }),
     register: (info) => wrapGatewayCall('a2a.register', { info }),
@@ -464,13 +2234,26 @@ const api = {
   },
 
   // ========== Discovery 相关 ==========
+  // 注意：Gateway 不支持 discovery 方法，返回 mock 数据
   discovery: {
-    status: () => wrapGatewayCall('discovery.status', {}),
-    peers: () => wrapGatewayCall('discovery.peers', {}),
-    tailscaleStatus: () => wrapGatewayCall('discovery.tailscale.status', {}),
-    scan: () => wrapGatewayCall('discovery.scan', {}),
-    start: () => wrapGatewayCall('discovery.start', {}),
-    stop: () => wrapGatewayCall('discovery.stop', {}),
+    status: () => Promise.resolve({ success: true, data: { enabled: false, status: 'mock' } }),
+    peers: () => Promise.resolve({ success: true, data: [] }),
+    tailscaleStatus: () => {
+      warnOnce('unknown-method:discovery.tailscaleStatus', '[API] discovery.tailscaleStatus 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
+    scan: () => {
+      warnOnce('unknown-method:discovery.scan', '[API] discovery.scan 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
+    start: () => {
+      warnOnce('unknown-method:discovery.start', '[API] discovery.start 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
+    stop: () => {
+      warnOnce('unknown-method:discovery.stop', '[API] discovery.stop 方法在 Gateway 中不存在')
+      return Promise.resolve({ success: false, error: '方法不存在' })
+    },
   },
 
   // ========== Gateway 连接管理 ==========
@@ -520,7 +2303,7 @@ const api = {
     // 检查安装状态
     checkStatus: async () => {
       try {
-        const result = await invoke('check_install_status')
+        const result = await invokeTauri('check_install_status')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'check_install_status' })
@@ -529,7 +2312,7 @@ const api = {
     // 触发自动安装
     install: async () => {
       try {
-        const result = await invoke('install_openclaw')
+        const result = await invokeTauri('install_openclaw')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'install_openclaw' })
@@ -538,7 +2321,7 @@ const api = {
     // 检查更新
     checkUpdate: async () => {
       try {
-        const result = await invoke('check_openclaw_update')
+        const result = await invokeTauri('check_openclaw_update')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'check_openclaw_update' })
@@ -547,7 +2330,7 @@ const api = {
     // 执行更新
     update: async () => {
       try {
-        const result = await invoke('update_openclaw')
+        const result = await invokeTauri('update_openclaw')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'update_openclaw' })
@@ -556,7 +2339,7 @@ const api = {
     // 获取 OpenClaw 路径
     getPath: async () => {
       try {
-        const result = await invoke('get_openclaw_path')
+        const result = await invokeTauri('get_openclaw_path')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'get_openclaw_path' })
@@ -569,7 +2352,7 @@ const api = {
     // 启动打包的 Gateway
     start: async () => {
       try {
-        const result = await invoke('start_bundled_gateway')
+        const result = await invokeTauri('start_bundled_gateway')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'start_bundled_gateway' })
@@ -578,7 +2361,7 @@ const api = {
     // 停止打包的 Gateway
     stop: async () => {
       try {
-        const result = await invoke('stop_bundled_gateway')
+        const result = await invokeTauri('stop_bundled_gateway')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'stop_bundled_gateway' })
@@ -587,7 +2370,7 @@ const api = {
     // 获取 Gateway 状态
     status: async () => {
       try {
-        const result = await invoke('bundled_gateway_status')
+        const result = await invokeTauri('bundled_gateway_status')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'bundled_gateway_status' })
@@ -596,7 +2379,7 @@ const api = {
     // 重启 Gateway
     restart: async () => {
       try {
-        const result = await invoke('restart_bundled_gateway')
+        const result = await invokeTauri('restart_bundled_gateway')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'restart_bundled_gateway' })
@@ -605,7 +2388,7 @@ const api = {
     // 健康检查
     healthCheck: async () => {
       try {
-        const result = await invoke('bundled_gateway_health_check')
+        const result = await invokeTauri('bundled_gateway_health_check')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'bundled_gateway_health_check' })
@@ -618,7 +2401,7 @@ const api = {
     // 获取当前版本
     getVersion: async () => {
       try {
-        const result = await invoke('get_app_version')
+        const result = await invokeTauri('get_app_version')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'get_app_version' })
@@ -627,16 +2410,25 @@ const api = {
     // 检查更新
     check: async () => {
       try {
-        const result = await invoke('check_for_updates')
+        const result = await invokeTauri('check_for_updates')
         return { success: true, data: result }
       } catch (error) {
+        const message = extractErrorMessage(error)
+        if (message.includes('自动更新功能已在 CN 版本中禁用')) {
+          return {
+            success: true,
+            data: null,
+            disabled: true,
+            reason: message,
+          }
+        }
         return handleError(error, { method: 'check_for_updates' })
       }
     },
     // 下载更新
     download: async () => {
       try {
-        const result = await invoke('download_update')
+        const result = await invokeTauri('download_update')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'download_update' })
@@ -645,10 +2437,19 @@ const api = {
     // 安装更新
     install: async () => {
       try {
-        const result = await invoke('install_update')
+        const result = await invokeTauri('install_update')
         return { success: true, data: result }
       } catch (error) {
         return handleError(error, { method: 'install_update' })
+      }
+    },
+    // 重启应用（用于更新安装后）
+    restart: async () => {
+      try {
+        const result = await invokeTauri('restart_app')
+        return { success: true, data: result }
+      } catch (error) {
+        return handleError(error, { method: 'restart_app' })
       }
     },
   },

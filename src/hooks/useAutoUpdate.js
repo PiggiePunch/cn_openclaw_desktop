@@ -3,7 +3,11 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import api from '@/lib/api'
-import { useTauriEvent } from './useTauriEvent'
+
+function isTauriRuntime() {
+  if (typeof window === 'undefined') return false
+  return Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__?.core)
+}
 
 /**
  * 自动更新 Hook
@@ -30,23 +34,25 @@ export function useAutoUpdate(options = {}) {
 
   // 加载当前版本
   useEffect(() => {
+    if (!isTauriRuntime()) return
     api.updates.getVersion()
       .then(result => result.success && setCurrentVersion(result.data))
       .catch(console.error)
   }, [])
 
-  // 监听下载进度事件（使用 useTauriEvent）
-  useTauriEvent('update-download-progress', (event) => {
-    setDownloadProgress(event.payload)
-  }, [])
-
   // 检查更新
   const checkForUpdates = useCallback(async () => {
+    if (!isTauriRuntime()) return null
     setIsChecking(true)
     setError(null)
 
     const result = await api.updates.check()
     if (result.success) {
+      if (result.disabled) {
+        setUpdateInfo(null)
+        setIsChecking(false)
+        return null
+      }
       setUpdateInfo(result.data)
       // 保存最后检查时间
       localStorage.setItem('openclaw_last_update_check', Date.now().toString())
@@ -65,6 +71,7 @@ export function useAutoUpdate(options = {}) {
 
   // 下载并安装更新
   const downloadUpdate = useCallback(async () => {
+    if (!isTauriRuntime()) return false
     setIsDownloading(true)
     setError(null)
     setDownloadProgress(null)
@@ -83,6 +90,7 @@ export function useAutoUpdate(options = {}) {
 
   // 重启应用
   const restartApp = useCallback(() => {
+    if (!isTauriRuntime()) return
     api.updates.restart().catch(console.error)
   }, [])
 
