@@ -82,6 +82,49 @@ const copyToClipboard = (text) => {
   navigator.clipboard.writeText(text)
 }
 
+const collectProviderModels = (providerConfig) => {
+  if (!providerConfig || typeof providerConfig !== 'object') return []
+  const models = []
+  const addModel = (value) => {
+    const modelId = typeof value === 'string' ? value.trim() : ''
+    if (!modelId || models.includes(modelId)) return
+    models.push(modelId)
+  }
+  if (Array.isArray(providerConfig.custom_models)) {
+    providerConfig.custom_models.forEach(addModel)
+  }
+  if (typeof providerConfig.model === 'string') {
+    addModel(providerConfig.model)
+  }
+  return models
+}
+
+const resolveCurrentProvider = (aiProvider, preferredId = '', orderedProviderIds = []) => {
+  if (!aiProvider || typeof aiProvider !== 'object') return ''
+
+  const isUsable = (providerId) => {
+    const cfg = aiProvider?.[providerId]
+    if (!cfg || typeof cfg !== 'object') return false
+    if (cfg.enabled === false) return false
+    const hasApiKey = typeof cfg.api_key === 'string' && cfg.api_key.trim().length > 0
+    const hasModel = collectProviderModels(cfg).length > 0
+    return hasApiKey && hasModel
+  }
+
+  const candidates = [
+    typeof aiProvider.current === 'string' ? aiProvider.current.trim() : '',
+    typeof preferredId === 'string' ? preferredId.trim() : '',
+    ...orderedProviderIds,
+    ...Object.keys(aiProvider).filter((id) => id !== 'current' && id !== 'embedding'),
+  ]
+
+  for (const providerId of candidates) {
+    if (providerId && isUsable(providerId)) return providerId
+  }
+
+  return ''
+}
+
 // 提供商行组件
 function ProviderRow({
   provider, index, total, config, updateConfig, showPassword, setShowPassword,
@@ -382,6 +425,7 @@ export default function AISettings({ onClose, onConfigSaved }) {
   const [showPassword, setShowPassword] = useState({})
   const [expandedProviders, setExpandedProviders] = useState([])
   const [activeTab, setActiveTab] = useState('domestic')
+  const [lastEditedProvider, setLastEditedProvider] = useState('')
 
   // 提供商顺序（持久化到 localStorage）
   const [providerOrder, setProviderOrder] = useState(() => {
@@ -406,8 +450,22 @@ export default function AISettings({ onClose, onConfigSaved }) {
 
   const saveConfig = async () => {
     setSaving(true)
-    const setResult = await api.config.set(config)
+    const nextCurrentProvider = resolveCurrentProvider(
+      config?.ai_provider,
+      lastEditedProvider,
+      providerOrder,
+    )
+    const configToSave = {
+      ...config,
+      ai_provider: {
+        ...(config?.ai_provider || {}),
+        ...(nextCurrentProvider ? { current: nextCurrentProvider } : {}),
+      },
+    }
+
+    const setResult = await api.config.set(configToSave)
     if (setResult.success) {
+      setConfig(configToSave)
       await api.config.syncToGateway()
       // 保存顺序
       localStorage.setItem('openclaw_provider_order', JSON.stringify(providerOrder))
@@ -424,6 +482,7 @@ export default function AISettings({ onClose, onConfigSaved }) {
   }
 
   const updateConfig = (provider, field, value) => {
+    setLastEditedProvider(provider)
     setConfig(prev => ({
       ...prev,
       ai_provider: {

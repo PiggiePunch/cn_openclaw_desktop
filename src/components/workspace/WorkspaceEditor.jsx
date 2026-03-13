@@ -244,44 +244,54 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
   const loadWorkspace = async () => {
     setLoading(true)
     try {
-      const configResult = await api.workspace.load(agentId)
-      if (configResult.success) {
-        let config = configResult.data
-        // 如果选择的是 CHANNELS.md，读取并解析 channels
-        if (selectedFile === 'CHANNELS.md') {
-          try {
-            const contentResult = await api.workspace.readFile(agentId, 'CHANNELS.md')
-            if (contentResult.success && contentResult.data) {
-              // 解析 YAML 格式的 channels
-              const match = contentResult.data.match(/^---\nchannels:\s*(.+)\n---/s)
-              if (match) {
-                config = { ...config, channels: JSON.parse(match[1]) }
-              }
-            }
-          } catch (e) {
-            console.error('解析 CHANNELS.md 失败:', e)
+      // 统一从 workspace 文件读取配置（CHANNELS.md 是通道配置的权威数据源）
+      let config = {
+        identity: {
+          name: agentId === 'main' ? '默认助手' : agentId,
+          emoji: '🤖',
+        },
+        channels: [],
+        files: [],
+      }
+
+      // 始终读取 CHANNELS.md 获取通道配置（不依赖 selectedFile）
+      let channelsFromFile = []
+      try {
+        const contentResult = await api.workspace.readFile(agentId, 'CHANNELS.md')
+        if (contentResult.success && contentResult.data) {
+          // 解析 YAML 格式的 channels
+          const match = contentResult.data.match(/^---\nchannels:\s*(.+)\n---/s)
+          if (match) {
+            channelsFromFile = JSON.parse(match[1])
           }
         }
-        setWorkspaceConfig(config)
-        if (selectedFile !== 'CHANNELS.md') {
-          const contentResult = await api.workspace.readFile(agentId, selectedFile)
-          if (contentResult.success) {
-            setFileContent(contentResult.data)
-          } else {
-            setFileContent('')
+      } catch (e) {
+        console.error('解析 CHANNELS.md 失败:', e)
+      }
+
+      // 如果 CHANNELS.md 没有通道数据，fallback 到 workspace.load（旧数据兼容）
+      if (!channelsFromFile || channelsFromFile.length === 0) {
+        try {
+          const legacyResult = await api.workspace.load(agentId)
+          if (legacyResult.success && legacyResult.data?.channels) {
+            channelsFromFile = legacyResult.data.channels
           }
+        } catch (e) {
+          console.error('读取旧通道配置失败:', e)
         }
-      } else {
-        console.error('加载 Workspace 失败:', configResult.error)
-        setWorkspaceConfig({
-          identity: {
-            name: agentId === 'main' ? '默认助手' : agentId,
-            emoji: '🤖',
-          },
-          channels: [],
-          files: [],
-        })
-        setFileContent('')
+      }
+
+      config = { ...config, channels: channelsFromFile }
+      setWorkspaceConfig(config)
+
+      // 读取其他文件内容（仅当不是 CHANNELS.md 时）
+      if (selectedFile !== 'CHANNELS.md') {
+        const contentResult = await api.workspace.readFile(agentId, selectedFile)
+        if (contentResult.success) {
+          setFileContent(contentResult.data)
+        } else {
+          setFileContent('')
+        }
       }
     } catch (error) {
       console.error('加载 Workspace 异常:', error)
@@ -397,12 +407,19 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
       name: newAgentName.trim(),
       workspace: null, // 使用默认路径
       emoji: '🤖',
-      avatar: null,
+      avatar: '',
     })
     if (result.success) {
       console.log('创建智能体成功:', result.data)
+      const newAgentId =
+        result.data?.agent_id ||
+        result.data?.agentId ||
+        result.data?.id ||
+        ''
       await loadAgents()
-      setAgentId(result.data.agent_id)
+      if (newAgentId) {
+        setAgentId(newAgentId)
+      }
       setShowCreateDialog(false)
       setNewAgentName('')
     } else {
@@ -692,8 +709,7 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
                   // 调用后端 API 保存通道配置
                   const result = await api.workspace.saveFile(agentId, 'CHANNELS.md', `---\nchannels: ${JSON.stringify(channels)}\n---`)
                   if (result.success) {
-                    // 尝试同步更新 Agent 的 channels 字段（旧 Gateway 可能不支持）
-                    await api.agents.update(agentId, { channels })
+                    // 通道配置已保存到 WORKSPACE 文件，无需额外调用 agents.update
                     setSaveStatus('saved')
                     await loadWorkspace()
                     setTimeout(() => setSaveStatus(null), 2000)
