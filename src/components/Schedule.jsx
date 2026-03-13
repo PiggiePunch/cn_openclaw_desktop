@@ -48,6 +48,18 @@ export default function Schedule() {
   const [history, setHistory] = useState([])
   const [deleteConfirm, setDeleteConfirm] = useState(null)  // 要删除的任务 ID
 
+  // 统一处理 API 可能返回的数组/对象结构，避免直接 .filter/.map 崩溃
+  const normalizeArray = (value, preferredKeys = []) => {
+    if (Array.isArray(value)) return value
+    if (!value || typeof value !== 'object') return []
+
+    for (const key of preferredKeys) {
+      if (Array.isArray(value[key])) return value[key]
+    }
+
+    return Object.values(value).filter(item => item && typeof item === 'object')
+  }
+
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -76,11 +88,31 @@ export default function Schedule() {
     const result = await api.agents.list()
     if (result.success) {
       // agent_list 返回 [[agent_id, identity_config], ...] 格式
-      const formattedAgents = (result.data || []).map(([id, identity]) => ({
-        id,
-        name: identity.name || id,
-        emoji: identity.emoji || '🤖'
-      }))
+      const rawAgents = normalizeArray(result.data, ['agents', 'items', 'list'])
+      const formattedAgents = rawAgents
+        .map((entry) => {
+          if (Array.isArray(entry)) {
+            const [id, identity] = entry
+            return {
+              id,
+              name: identity?.name || id,
+              emoji: identity?.emoji || '🤖'
+            }
+          }
+
+          if (entry && typeof entry === 'object') {
+            const id = entry.id || entry.agent_id
+            if (!id) return null
+            return {
+              id,
+              name: entry.name || entry.display_name || id,
+              emoji: entry.emoji || '🤖'
+            }
+          }
+
+          return null
+        })
+        .filter(Boolean)
       setAgents(formattedAgents)
     } else {
       console.error('加载 Agent 列表失败:', result.error)
@@ -95,10 +127,42 @@ export default function Schedule() {
     const result = await api.cron.list()
     if (result.success) {
       console.log('📋 加载结果:', result.data)
-      setTasks(result.data || [])
+      const rawTasks = normalizeArray(result.data, ['tasks', 'items', 'list'])
+      const seenKeys = new Set()
+      const normalizedTasks = rawTasks.map((task, index) => {
+        const baseId =
+          task?.id ??
+          task?.jobId ??
+          task?.job_id ??
+          task?.taskId ??
+          task?.task_id ??
+          null
+
+        const normalizedId = baseId != null ? String(baseId) : null
+        const keySeed =
+          normalizedId ||
+          String(task?.name || '').trim() ||
+          `task-${index}`
+
+        let uiKey = keySeed
+        let suffix = 1
+        while (seenKeys.has(uiKey)) {
+          suffix += 1
+          uiKey = `${keySeed}-${suffix}`
+        }
+        seenKeys.add(uiKey)
+
+        return {
+          ...task,
+          id: normalizedId,
+          _uiKey: uiKey,
+        }
+      })
+      setTasks(normalizedTasks)
     } else {
       console.error('加载定时任务失败:', result.error)
       toast.error('加载失败', result.error)
+      setTasks([])
     }
     setIsLoading(false)
   }
@@ -107,7 +171,8 @@ export default function Schedule() {
     // 🆕 使用统一 API 服务层
     const result = await api.cron.history()
     if (result.success) {
-      const taskHistory = result.data.filter(r => r.task_id === taskId)
+      const records = normalizeArray(result.data, ['history', 'items', 'records'])
+      const taskHistory = records.filter(r => r.task_id === taskId || r.taskId === taskId)
       setHistory(taskHistory)
       setShowHistory(taskId)
     } else {
@@ -238,17 +303,19 @@ export default function Schedule() {
     { label: '每30分钟', value: '*/30 * * * *' },
   ]
 
-  const runningCount = tasks.filter(t => t.enabled).length
-  const pausedCount = tasks.filter(t => !t.enabled).length
+  const safeTasks = Array.isArray(tasks) ? tasks : []
+  const safeAgents = Array.isArray(agents) ? agents : []
+  const runningCount = safeTasks.filter(t => t.enabled).length
+  const pausedCount = safeTasks.filter(t => !t.enabled).length
 
-  const filteredTasks = tasks.filter(task =>
-    task.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    task.description?.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredTasks = safeTasks.filter(task =>
+    String(task?.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    String(task?.description || '').toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   const getAgentDisplayName = (agentId) => {
     if (!agentId) return '未知'
-    const agent = agents.find(a => a.id === agentId)
+    const agent = safeAgents.find(a => a.id === agentId)
     return agent?.name || agent?.display_name || agentId
   }
 
@@ -295,7 +362,7 @@ export default function Schedule() {
         <div className="flex items-center gap-2">
           <Badge variant="secondary" className="gap-1">
             <ClipboardList className="w-3 h-3" />
-            {tasks.length} 任务
+            {safeTasks.length} 任务
           </Badge>
           <Badge variant="secondary" className="gap-1 text-green-600">
             <Play className="w-3 h-3" />
@@ -331,9 +398,9 @@ export default function Schedule() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {filteredTasks.map(task => (
+          {filteredTasks.map((task, index) => (
             <Card
-              key={task.id}
+              key={task._uiKey || task.id || `task-${index}`}
               className={`group hover:shadow-md transition-all duration-200 ${
                 task.enabled ? 'hover:border-primary/30' : 'opacity-70'
               }`}
@@ -632,7 +699,7 @@ export default function Schedule() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">不绑定 Agent</SelectItem>
-                  {agents.map(agent => (
+                  {safeAgents.map(agent => (
                     <SelectItem key={agent.id} value={agent.id}>
                       <div className="flex items-center gap-2">
                         <Bot className="w-3 h-3" />

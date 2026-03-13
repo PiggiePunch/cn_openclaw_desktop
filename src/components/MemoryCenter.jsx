@@ -24,6 +24,17 @@ import {
 import api from '@/lib/api'
 import { toast } from '@/hooks/useToast'
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 /**
  * 反思记录组件
  */
@@ -37,7 +48,7 @@ function ReflectionRecords() {
     // 🆕 使用统一 API 服务层
     const result = await api.reflection.getHistory()
     if (result.success) {
-      setReflections(result.data?.reflections || [])
+      setReflections(normalizeArray(result.data, ['reflections', 'items', 'history', 'list']))
     } else {
       console.error('加载反思记录失败:', result.error)
       setReflections([])
@@ -144,7 +155,7 @@ function ReflectionRecords() {
                 <p className="text-sm text-muted-foreground line-clamp-3">
                   {reflection.summary || reflection.content || '无摘要'}
                 </p>
-                {reflection.improvements && reflection.improvements.length > 0 && (
+                {Array.isArray(reflection.improvements) && reflection.improvements.length > 0 && (
                   <div className="mt-3 flex flex-wrap gap-1">
                     {reflection.improvements.slice(0, 3).map((imp, idx) => (
                       <Badge key={idx} variant="outline" className="text-xs">
@@ -186,20 +197,24 @@ export default function MemoryCenter() {
     if (result.success) {
       const data = result.data
       // result 是 SyncResult 结构：{ imported, agents_checked, sessions_dirs_found, details, errors }
-      if (data.imported > 0) {
+      const imported = Number.isFinite(data?.imported) ? data.imported : 0
+      const details = normalizeArray(data?.details, ['items', 'list'])
+      const errors = Array.isArray(data?.errors) ? data.errors : []
+
+      if (imported > 0) {
         // 成功导入数据
-        const detailMsg = data.details
+        const detailMsg = details
           .filter(d => d.imported > 0)
           .map(d => `${d.agent_id}: ${d.imported} 条`)
           .join('、')
 
-        toast.success('同步成功', `成功导入 ${data.imported} 条会话记录${detailMsg ? ` (${detailMsg})` : ''}`)
-      } else if (data.errors && data.errors.length > 0) {
+        toast.success('同步成功', `成功导入 ${imported} 条会话记录${detailMsg ? ` (${detailMsg})` : ''}`)
+      } else if (errors.length > 0) {
         // 没有导入数据，但有错误信息
-        toast.warning('未导入数据', data.errors[0])
+        toast.warning('未导入数据', errors[0])
       } else {
         // 其他情况
-        toast.info('同步完成', `检查了 ${data.agents_checked} 个 agent，找到 ${data.sessions_dirs_found} 个 sessions 目录`)
+        toast.info('同步完成', `检查了 ${data?.agents_checked || 0} 个 agent，找到 ${data?.sessions_dirs_found || 0} 个 sessions 目录`)
       }
     } else {
       console.error('同步失败:', result.error)
@@ -217,7 +232,7 @@ export default function MemoryCenter() {
     // 🆕 使用统一 API 服务层
     const result = await api.memory.searchGateway(searchQuery, 10)
     if (result.success) {
-      setSearchResults(result.data?.results || [])
+      setSearchResults(normalizeArray(result.data, ['results', 'items', 'memories', 'list']))
     } else {
       console.error('搜索失败:', result.error)
       toast.error('搜索失败', result.error)

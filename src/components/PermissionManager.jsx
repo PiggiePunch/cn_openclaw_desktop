@@ -151,9 +151,9 @@ function AuditLogs() {
   }, [])
 
   const filteredLogs = logs.filter(log =>
-    log.action?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    log.details?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    log.user?.toLowerCase().includes(searchQuery.toLowerCase())
+    String(log?.action || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    String(log?.details || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    String(log?.user || '').toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   const formatTime = (timestamp) => {

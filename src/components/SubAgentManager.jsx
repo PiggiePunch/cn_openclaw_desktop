@@ -90,6 +90,17 @@ const parseAgentId = (sessionKey) => {
   return sessionKey
 }
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 export default function SubAgentManager() {
   const [agents, setAgents] = useState([])
   const [stats, setStats] = useState(null)
@@ -127,10 +138,16 @@ export default function SubAgentManager() {
 
     // 只加载子 Agent（临时智能体）
     const subAgentsResult = await api.subagents.list()
+    const rawSubAgents = normalizeArray(subAgentsResult.data, ['subagents', 'agents', 'items', 'list'])
 
     // SubAgent 子智能体
-    const typedSubAgents = (subAgentsResult.data || []).map(agent => ({
+    const typedSubAgents = rawSubAgents.map((agent, index) => ({
       ...agent,
+      id: typeof agent?.id === 'string' && agent.id.trim() ? agent.id.trim() : `subagent-${index}`,
+      config: {
+        ...(agent?.config || {}),
+        tools: Array.isArray(agent?.config?.tools) ? agent.config.tools : [],
+      },
       _type: 'subagent',
     }))
 
@@ -157,9 +174,19 @@ export default function SubAgentManager() {
     // 🆕 使用统一 API 服务层
     const result = await api.subagents.presets()
     console.log('预设模板加载结果:', result)
+    const presetList = normalizeArray(result.data, ['presets', 'items', 'list'])
+      .map((preset, index) => ({
+        id: preset?.id || `preset-${index}`,
+        name: preset?.name || `预设 ${index + 1}`,
+        description: preset?.description || '',
+        system_prompt: preset?.system_prompt || '',
+        tools: Array.isArray(preset?.tools) ? preset.tools : [],
+        timeout_ms: Number.isFinite(preset?.timeout_ms) ? preset.timeout_ms : 60000,
+      }))
+
     // 确保数据有效，否则使用默认预设
-    if (result.success && result.data && result.data.length > 0) {
-      setPresets(result.data)
+    if (result.success && presetList.length > 0) {
+      setPresets(presetList)
     } else {
       console.log('API返回空数据，使用默认预设')
       setPresets(DEFAULT_PRESETS)
@@ -199,7 +226,7 @@ export default function SubAgentManager() {
       name: preset.name,
       description: preset.description,
       system_prompt: preset.system_prompt,
-      tools: preset.tools.join(', '),
+      tools: (Array.isArray(preset.tools) ? preset.tools : []).join(', '),
       timeout_ms: preset.timeout_ms,
       initial_message: '',
     })
@@ -227,7 +254,8 @@ export default function SubAgentManager() {
 
   // 保留 terminateAgent 用于向后兼容
   const terminateAgent = async (agentId) => {
-    const agent = agents.find(a => a.id === agentId)
+    const list = Array.isArray(agents) ? agents : []
+    const agent = list.find(a => a.id === agentId)
     if (agent) {
       await deleteAgent(agent)
     }
@@ -261,9 +289,10 @@ export default function SubAgentManager() {
     setError(null)
   }
 
-  const filteredAgents = agents.filter(agent =>
-    agent.config?.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    agent.id?.toLowerCase().includes(searchQuery.toLowerCase())
+  const safeAgents = Array.isArray(agents) ? agents : []
+  const filteredAgents = safeAgents.filter(agent =>
+    String(agent?.config?.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+    String(agent?.id || '').toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   return (
@@ -283,7 +312,7 @@ export default function SubAgentManager() {
         <div className="flex items-center gap-2">
           <Badge variant="secondary" className="gap-1">
             <Users className="w-3 h-3" />
-            {stats?.total || agents.length}
+            {stats?.total || safeAgents.length}
           </Badge>
           <Badge variant="secondary" className="gap-1 text-yellow-600">
             <Activity className="w-3 h-3" />
@@ -291,7 +320,7 @@ export default function SubAgentManager() {
           </Badge>
         </div>
 
-        <Button size="sm" variant="outline" onClick={cleanupAgents} disabled={agents.length === 0}>
+        <Button size="sm" variant="outline" onClick={cleanupAgents} disabled={safeAgents.length === 0}>
           <Trash2 className="w-4 h-4 mr-1" />
           清理
         </Button>
@@ -317,7 +346,7 @@ export default function SubAgentManager() {
         <TabsList className="h-8">
           <TabsTrigger value="agents" className="text-xs h-7 px-3">
             <Users className="w-3 h-3 mr-1" />
-            智能体 ({agents.length})
+            智能体 ({safeAgents.length})
           </TabsTrigger>
           <TabsTrigger value="presets" className="text-xs h-7 px-3">
             <Sparkles className="w-3 h-3 mr-1" />

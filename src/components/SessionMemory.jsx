@@ -21,19 +21,64 @@ export default function SessionMemory() {
   const [loading, setLoading] = useState(true)
   const [deleting, setDeleting] = useState(null)
 
+  const parseAgentIdFromSessionKey = (sessionKey) => {
+    if (typeof sessionKey !== 'string' || !sessionKey) return 'unknown'
+    if (sessionKey === 'main' || sessionKey.startsWith('agent:main')) return 'main'
+
+    if (sessionKey.startsWith('agent:')) {
+      const parts = sessionKey.split(':')
+      return parts[1] || 'unknown'
+    }
+
+    const slashParts = sessionKey.split('/')
+    return slashParts[0] || 'unknown'
+  }
+
+  const normalizeSessionItem = (item, index) => {
+    if (typeof item === 'string') {
+      return {
+        id: item || `session-${index}`,
+        agent_id: parseAgentIdFromSessionKey(item),
+        preview: item,
+      }
+    }
+
+    if (!item || typeof item !== 'object') return null
+
+    const sessionKey =
+      item.session_key ||
+      item.sessionKey ||
+      item.key ||
+      item.id ||
+      ''
+
+    const id = sessionKey || item.id || `session-${index}`
+    const agentId = item.agent_id || item.agentId || parseAgentIdFromSessionKey(sessionKey)
+
+    return {
+      ...item,
+      id,
+      agent_id: agentId,
+      preview: item.preview || sessionKey || item.title || '',
+      created_at: item.created_at || item.createdAt || null,
+      updated_at: item.updated_at || item.updatedAt || null,
+      message_count: item.message_count || item.messageCount || 0,
+    }
+  }
+
   // 加载会话列表
   const loadSessions = async () => {
     setLoading(true)
     // 使用 api.sessions.list() - 不传 agentId 则获取所有会话
     const result = await api.sessions.list()
     if (result.success) {
-      // sessions.list 返回的是 sessionKeys 数组，需要转换格式
-      const sessionKeys = result.data?.sessionKeys || result.data || []
-      setSessions(Array.isArray(sessionKeys) ? sessionKeys.map(key => ({
-        id: key,
-        agent_id: key.split('/')[0] || 'unknown',
-        preview: key
-      })) : [])
+      const rawSessions = Array.isArray(result.data)
+        ? result.data
+        : (result.data?.sessionKeys || result.data?.sessions || [])
+      const normalized = Array.isArray(rawSessions)
+        ? rawSessions.map((item, index) => normalizeSessionItem(item, index)).filter(Boolean)
+        : []
+      setSessions(normalized)
     } else {
       console.error('加载会话列表失败:', result.error)
       setSessions([])

@@ -41,7 +41,7 @@ const DEFAULT_PROVIDERS = [
   { id: 'ernie', name: '文心一言', icon: CircleDot, bgColor: 'bg-red-500', category: 'domestic', requiresSecretKey: true, helpUrl: 'https://cloud.baidu.com/product/wenxinworkshop/application' },
   { id: 'moonshot', name: '月之暗面', icon: CircleDot, bgColor: 'bg-indigo-500', category: 'domestic', defaultBaseUrl: 'https://api.moonshot.cn/v1', helpUrl: 'https://platform.moonshot.cn/console/api-keys' },
   { id: 'doubao', name: '豆包', icon: CircleDot, bgColor: 'bg-amber-500', category: 'domestic', defaultBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3', helpUrl: 'https://console.volcengine.com/ark' },
-  { id: 'minimax', name: 'MiniMax', icon: CircleDot, bgColor: 'bg-cyan-500', category: 'domestic', defaultBaseUrl: 'https://api.minimaxi.com/v1', helpUrl: 'https://www.minimaxi.com/' },
+  { id: 'minimax', name: 'MiniMax', icon: CircleDot, bgColor: 'bg-cyan-500', category: 'domestic', defaultBaseUrl: 'https://api.minimaxi.com/anthropic', helpUrl: 'https://www.minimaxi.com/' },
   { id: 'openai', name: 'OpenAI', icon: CircleDot, bgColor: 'bg-green-500', category: 'international', defaultBaseUrl: 'https://api.openai.com/v1', helpUrl: 'https://platform.openai.com/api-keys' },
   { id: 'anthropic', name: 'Anthropic', icon: CircleDot, bgColor: 'bg-rose-500', category: 'international', defaultBaseUrl: 'https://api.anthropic.com/v1', helpUrl: 'https://console.anthropic.com/settings/keys' },
   { id: 'google', name: 'Google Gemini', icon: CircleDot, bgColor: 'bg-sky-500', category: 'international', defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta', helpUrl: 'https://aistudio.google.com/app/apikey' },
@@ -409,9 +409,11 @@ export default function AISettings({ onClose, onConfigSaved }) {
     const setResult = await api.config.set(config)
     if (setResult.success) {
       await api.config.syncToGateway()
-      await api.gateway.restart()
       // 保存顺序
       localStorage.setItem('openclaw_provider_order', JSON.stringify(providerOrder))
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('openclaw:config-updated'))
+      }
       setSaveSuccess(true)
       setTimeout(() => setSaveSuccess(false), 2000)
       onConfigSaved?.()

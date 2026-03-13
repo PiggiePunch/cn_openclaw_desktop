@@ -24,6 +24,17 @@ import {
 import api from '@/lib/api'
 import { toast } from '@/hooks/useToast'
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 export default function SecretsManager() {
   // 状态管理
   const [secrets, setSecrets] = useState([])
@@ -51,16 +62,28 @@ export default function SecretsManager() {
     setIsLoading(true)
     const result = await api.secrets.list()
     if (result.success) {
-      // secrets.list 返回的是 { key1: value1, key2: value2 } 格式
-      // 转换为数组格式方便渲染
-      const secretsArray = Object.entries(result.data || {}).map(([key, value]) => ({
-        key,
-        value,
-      }))
+      let secretsArray = normalizeArray(result.data, ['secrets', 'items', 'list'])
+
+      if (secretsArray.length > 0) {
+        secretsArray = secretsArray.map((item, index) => ({
+          key: item?.key || item?.name || `secret-${index}`,
+          value: item?.value ?? item?.secret ?? '',
+        }))
+      } else {
+        // 兼容 { key1: value1, key2: value2 } 映射格式
+        secretsArray = Object.entries(result.data || {})
+          .filter(([key]) => key !== 'secrets' && key !== 'items')
+          .map(([key, value]) => ({
+            key,
+            value,
+          }))
+      }
+
       setSecrets(secretsArray)
     } else {
       console.error('加载密钥列表失败:', result.error)
       toast.error('加载失败', result.error)
+      setSecrets([])
     }
     setIsLoading(false)
   }

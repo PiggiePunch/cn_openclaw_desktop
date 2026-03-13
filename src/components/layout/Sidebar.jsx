@@ -17,7 +17,6 @@ import {
   MonitorSmartphone,
   Link2,
   Layout,
-  Cpu,
   Volume2,
   Reply,
   Users,
@@ -53,12 +52,6 @@ const navigationGroups = [
       { id: 'canvas', label: 'Canvas 画布', icon: Layout },
       { id: 'a2a', label: 'A2A 通信', icon: Radio },
       { id: 'patterns', label: '模式库', icon: BookOpen },
-    ]
-  },
-  {
-    title: '模型',
-    items: [
-      { id: 'models', label: '模型管理', icon: Cpu },
     ]
   },
   {

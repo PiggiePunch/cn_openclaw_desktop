@@ -204,6 +204,17 @@ const ActionIcon = ({ type }) => {
   }
 }
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 export default function AutoReply() {
   const [rules, setRules] = useState([])
   const [status, setStatus] = useState(null)
@@ -232,9 +243,10 @@ export default function AutoReply() {
     // 🆕 使用统一 API 服务层
     const result = await api.autoReply.list()
     if (result.success) {
-      setRules(result.data?.rules || [])
+      setRules(normalizeArray(result.data, ['rules', 'items', 'list']))
     } else {
       console.error('加载规则失败:', result.error)
+      setRules([])
     }
     setIsLoading(false)
   }
@@ -440,7 +452,7 @@ export default function AutoReply() {
                     <span className="text-muted-foreground">动作:</span>
                     <Badge variant="outline">{rule.action?.type}</Badge>
                   </div>
-                  {rule.channels?.length > 0 && (
+                  {Array.isArray(rule.channels) && rule.channels.length > 0 && (
                     <div className="flex items-center gap-1">
                       <span className="text-muted-foreground">渠道:</span>
                       {rule.channels.map(c => (

@@ -71,12 +71,19 @@ function getAvatarColor(name, customColor) {
 
 // 从 session_key 解析 agent_id
 function parseAgentId(sessionKey) {
+  if (typeof sessionKey !== 'string') return 'main'
   if (sessionKey === 'main') return 'main'
   if (sessionKey.startsWith('agent:')) {
     const parts = sessionKey.split(':')
     return parts[1] || 'main'
   }
   return 'main'
+}
+
+function normalizeSessionKeyValue(value) {
+  if (typeof value !== 'string') return 'main'
+  const key = value.trim()
+  return key || 'main'
 }
 
 // 编辑智能体弹窗组件
@@ -354,6 +361,14 @@ export default function ChatDrawer({
   const [showDeleteSessionDialog, setShowDeleteSessionDialog] = useState(false)
   const [deleteSessionKey, setDeleteSessionKey] = useState('')
   const [deleteSessionTitle, setDeleteSessionTitle] = useState('')
+  const safeGatewaySessions = Array.isArray(gatewaySessions)
+    ? gatewaySessions
+      .filter((session) => session && typeof session === 'object')
+      .map((session) => ({
+        ...session,
+        session_key: normalizeSessionKeyValue(session.session_key),
+      }))
+    : []
 
   // 获取智能体显示名称
   const getAgentDisplayName = (sessionKey) => {
@@ -492,8 +507,8 @@ export default function ChatDrawer({
         {/* 头像列表 */}
         <ScrollArea className="flex-1">
           <div className="p-1.5 md:p-2 space-y-1.5 md:space-y-2">
-            {gatewaySessions && gatewaySessions.length > 0 ? (
-              gatewaySessions.map(session => {
+            {safeGatewaySessions.length > 0 ? (
+              safeGatewaySessions.map(session => {
                 const displayName = getAgentDisplayName(session.session_key)
                 const customColor = getAgentColor(session.session_key)
                 const customAvatar = getAgentAvatar(session.session_key)
@@ -592,8 +607,8 @@ export default function ChatDrawer({
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
               加载中...
             </div>
-          ) : gatewaySessions && gatewaySessions.length > 0 ? (
-            gatewaySessions.map(session => (
+          ) : safeGatewaySessions.length > 0 ? (
+            safeGatewaySessions.map(session => (
               <AgentItem
                 key={session.session_key}
                 session={session}
@@ -873,21 +888,22 @@ function AgentItem({
               </div>
             ) : agentSessions && agentSessions.length > 0 ? (
               <div className="py-1">
-                {agentSessions.map(sess => {
-                  const isCurrentSession = sess.session_key === currentSessionKey
+                {agentSessions.map((sess, index) => {
+                  const sessionKey = normalizeSessionKeyValue(sess?.session_key)
+                  const isCurrentSession = sessionKey === currentSessionKey
                   // 🔥 只有 session_key 包含 :main 结尾或者是 main 本身才是默认会话
-                  const isMainSession = sess.session_key === 'main' ||
-                    sess.session_key.endsWith(':main')
+                  const isMainSession = sessionKey === 'main' ||
+                    sessionKey.endsWith(':main')
                   return (
                     <div
-                      key={sess.session_key}
+                      key={sessionKey || `session-${index}`}
                       className={cn(
                         "group flex items-center px-3 py-2 mx-2 my-1 rounded-md cursor-pointer transition-colors",
                         isCurrentSession
                           ? 'bg-primary/20 text-primary'
                           : 'hover:bg-surface-elevated text-foreground-secondary'
                       )}
-                      onClick={() => onSelectSession(sess.session_key)}
+                      onClick={() => onSelectSession(sessionKey)}
                     >
                       <MessageSquare className="w-3.5 h-3.5 mr-2 flex-shrink-0" />
                       <span className="flex-1 text-sm truncate">{sess.title || '未命名会话'}</span>
@@ -898,7 +914,7 @@ function AgentItem({
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
-                            onDeleteSession(sess.session_key, sess.title)
+                            onDeleteSession(sessionKey, sess.title)
                           }}
                           className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/20 text-destructive transition-all"
                           title="删除会话"

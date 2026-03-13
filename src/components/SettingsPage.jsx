@@ -1326,7 +1326,7 @@ export default function SettingsPage({
           <div className="p-6 bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950 dark:to-purple-950 rounded-xl">
             <div className="flex items-center justify-between">
               <div>
-                <div className="font-semibold text-foreground mb-1">模型管理界面</div>
+                <div className="font-semibold text-foreground mb-1">模型设置弹窗</div>
                 <div className="text-sm text-foreground-secondary">
                   支持 10+ AI 提供商（国内/国外） • 模型选择 • API Key 管理
                 </div>
@@ -1336,7 +1336,7 @@ export default function SettingsPage({
                 className="bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white"
               >
                 <Sparkles className="w-4 h-4 mr-2" />
-                打开模型管理
+                打开模型设置
               </Button>
             </div>
             <div className="mt-4 flex flex-wrap gap-2">

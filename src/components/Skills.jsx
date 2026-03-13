@@ -63,6 +63,17 @@ const STATUS_CONFIG = {
   Failed: { color: 'text-red-600', bg: 'bg-red-50', label: '失败', icon: XCircle },
 }
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 export default function Skills() {
   const [skills, setSkills] = useState([])
   const [stats, setStats] = useState(null)
@@ -132,16 +143,10 @@ export default function Skills() {
 
   const initSkills = async () => {
     setIsLoading(true)
-    // 🆕 使用统一 API 服务层
-    const result = await api.skills.init()
-    if (result.success || result.error?.includes?.('已初始化')) {
-      console.log('Skills 平台已初始化，继续加载数据')
-      setIsInitialized(true)
-      await loadData()
-    } else {
-      console.error('初始化 Skills 平台失败:', result.error)
-      toast.error('初始化失败', result.error)
-    }
+    // Gateway 不支持 skills.init 方法，直接加载数据
+    console.log('Skills 平台初始化，直接加载数据')
+    setIsInitialized(true)
+    await loadData()
     setIsLoading(false)
   }
 
@@ -161,9 +166,10 @@ export default function Skills() {
     // 🆕 使用统一 API 服务层
     const result = await api.skills.list(params)
     if (result.success) {
-      setSkills(result.data?.skills || [])
+      setSkills(normalizeArray(result.data, ['skills', 'items', 'list']))
     } else {
       console.error('加载 Skills 列表失败:', result.error)
+      setSkills([])
     }
     setIsLoading(false)
   }
@@ -363,7 +369,7 @@ export default function Skills() {
     setIsClawHubSearching(true)
     const result = await api.skills.clawhubSearch(clawHubQuery || '')
     if (result.success) {
-      setClawHubResults(result.data?.skills || [])
+      setClawHubResults(normalizeArray(result.data, ['skills', 'items', 'list']))
     } else {
       if (!autoLoad) {
         toast.error('搜索失败', result.error)
@@ -509,7 +515,8 @@ export default function Skills() {
             const categoryKey = getCategoryKey(skill.category)
             const categoryConfig = CATEGORY_ICONS[categoryKey] || CATEGORY_ICONS.Utility
             const CategoryIcon = categoryConfig.icon
-            const statusKey = getStatusKey(skill.status)
+            const skillStatus = typeof skill?.status === 'string' ? skill.status : 'Ready'
+            const statusKey = getStatusKey(skillStatus)
             const statusConfig = STATUS_CONFIG[statusKey] || STATUS_CONFIG.Ready
             const StatusIcon = statusConfig.icon
 
@@ -574,7 +581,7 @@ export default function Skills() {
                         variant="ghost"
                         size="sm"
                         className="h-6 w-6 p-0"
-                        disabled={skill.status.includes('Running') || skill.status.includes('Paused')}
+                        disabled={skillStatus.includes('Running') || skillStatus.includes('Paused')}
                       >
                         <Play className="w-3 h-3" />
                       </Button>
@@ -590,7 +597,7 @@ export default function Skills() {
                       >
                         <Eye className="w-3 h-3" />
                       </Button>
-                      {skill.status.includes('Ready') && (
+                      {skillStatus.includes('Ready') && (
                         <Button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -603,7 +610,7 @@ export default function Skills() {
                           <Pause className="w-3 h-3" />
                         </Button>
                       )}
-                      {skill.status.includes('Paused') && (
+                      {skillStatus.includes('Paused') && (
                         <Button
                           onClick={(e) => {
                             e.stopPropagation()

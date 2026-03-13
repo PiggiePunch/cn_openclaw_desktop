@@ -111,8 +111,8 @@ export default function ToolManager() {
     const groups = {}
     const filtered = tools.filter(tool => {
       const matchesSearch = searchQuery
-        ? tool.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          tool.description?.toLowerCase().includes(searchQuery.toLowerCase())
+        ? String(tool?.name || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+          String(tool?.description || '').toLowerCase().includes(searchQuery.toLowerCase())
         : true
 
       const matchesCategory = selectedCategory === 'all' ||

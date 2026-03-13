@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Button } from './ui/button'
 import { Label } from './ui/label'
 import { Input } from './ui/input'
@@ -27,9 +27,8 @@ import './chat/chat.css'
 
 // 🆕 使用新的服务层和工具
 import api from '@/lib/api'
+import { getGateway } from '@/lib/gateway'
 import { toast } from '@/hooks/useToast'
-import { useTauriEvents } from '@/hooks/useTauriEvent'
-import { useAppStore } from '@/hooks/useAppStore'
 
 // 从session_key获取显示名称
 function getSessionDisplayName(sessionKey) {
@@ -52,18 +51,53 @@ function getSessionDisplayName(sessionKey) {
 // main → main (不变)
 function normalizeSessionKey(sessionKey) {
   if (!sessionKey) return 'main'
-  if (sessionKey === 'main') return 'main'
+  const raw = String(sessionKey).trim()
+  if (!raw) return 'main'
+
+  const lowered = raw.toLowerCase()
+  if (lowered === 'main' || lowered === 'agent:main' || lowered === 'agent:main:main') {
+    return 'main'
+  }
 
   // 检查是否是 agent: 格式
-  if (sessionKey.startsWith('agent:')) {
-    const parts = sessionKey.split(':').filter(Boolean)
+  if (raw.startsWith('agent:')) {
+    const parts = raw.split(':').filter(Boolean)
     // 如果只有 2 部分 (agent:id)，补全为 3 部分 (agent:id:main)
     if (parts.length === 2) {
-      return `${sessionKey}:main`
+      return `${raw}:main`
     }
   }
 
-  return sessionKey
+  return raw
+}
+
+function parseAgentIdFromSessionKey(sessionKey) {
+  if (typeof sessionKey !== 'string' || !sessionKey.trim()) return 'main'
+  if (!sessionKey.startsWith('agent:')) return 'main'
+  return sessionKey.split(':')[1] || 'main'
+}
+
+function extractTextFromGatewayMessage(messageLike) {
+  if (!messageLike) return ''
+  const source = typeof messageLike === 'object' && messageLike !== null
+    ? (Object.prototype.hasOwnProperty.call(messageLike, 'content') ? messageLike.content : messageLike)
+    : messageLike
+
+  if (typeof source === 'string') return source
+  if (Array.isArray(source)) {
+    return source
+      .map((block) => {
+        if (!block || typeof block !== 'object') return ''
+        if (block.type === 'text' && typeof block.text === 'string') return block.text
+        if (block.type === 'thinking' && typeof block.thinking === 'string') return block.thinking
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  if (typeof source?.text === 'string') return source.text
+  return ''
 }
 
 // 格式化消息时间
@@ -91,6 +125,73 @@ function formatMessageTime(timestamp) {
       hour: '2-digit',
       minute: '2-digit'
     })
+  }
+}
+
+function collectProviderModels(providerConfig) {
+  if (!providerConfig || typeof providerConfig !== 'object') return []
+  const models = []
+  const appendModel = (value) => {
+    const id = typeof value === 'string' ? value.trim() : ''
+    if (!id || models.includes(id)) return
+    models.push(id)
+  }
+
+  if (Array.isArray(providerConfig.custom_models)) {
+    providerConfig.custom_models.forEach(appendModel)
+  }
+  if (Array.isArray(providerConfig.models)) {
+    for (const model of providerConfig.models) {
+      if (typeof model === 'string') {
+        appendModel(model)
+      } else if (model && typeof model === 'object') {
+        appendModel(model.id || model.name)
+      }
+    }
+  }
+  appendModel(providerConfig.model)
+  return models
+}
+
+function getConfiguredProviderEntries(providerConfigMap) {
+  if (!providerConfigMap || typeof providerConfigMap !== 'object') return []
+  const entries = []
+  for (const [id, cfg] of Object.entries(providerConfigMap)) {
+    if (id === 'current' || id === 'embedding') continue
+    if (!cfg || typeof cfg !== 'object') continue
+    const models = collectProviderModels(cfg)
+    const hasApiKey = typeof cfg.api_key === 'string' && cfg.api_key.trim().length > 0
+    const enabled = cfg.enabled !== false
+    if (!enabled || !hasApiKey || models.length === 0) continue
+    entries.push({ id, cfg, models })
+  }
+  return entries
+}
+
+function pickProviderSelection(providerConfigMap, preferredProvider = '', preferredModel = '') {
+  const configured = getConfiguredProviderEntries(providerConfigMap)
+  if (configured.length === 0) {
+    return { provider: '', model: '', providers: [] }
+  }
+
+  const byId = new Map(configured.map((item) => [item.id, item]))
+  const providerFromConfig = typeof providerConfigMap?.current === 'string' ? providerConfigMap.current.trim() : ''
+  const chosenProvider = [
+    typeof preferredProvider === 'string' ? preferredProvider.trim() : '',
+    providerFromConfig,
+    configured[0]?.id || '',
+  ].find((id) => id && byId.has(id)) || configured[0].id
+
+  const entry = byId.get(chosenProvider) || configured[0]
+  const requestedModel = typeof preferredModel === 'string' ? preferredModel.trim() : ''
+  const chosenModel = (requestedModel && entry.models.includes(requestedModel))
+    ? requestedModel
+    : entry.models[0]
+
+  return {
+    provider: entry.id,
+    model: chosenModel || '',
+    providers: configured,
   }
 }
 
@@ -151,9 +252,6 @@ export default function Chat({ switchToAgent }) {
 
   // 🔥 智能体名称缓存（从 Workspace 加载的真实名称）
   const [agentNames, setAgentNames] = useState({})
-
-  // Gateway 状态
-  const [gatewayStatus, setGatewayStatus] = useState(null)
 
   // 🔥 记忆同步状态
   const [memorySyncEnabled, setMemorySyncEnabled] = useState(() => {
@@ -239,15 +337,10 @@ export default function Chat({ switchToAgent }) {
         const cfg = result.data
         setConfig(cfg)
 
-        // 读取当前提供商和模型
-        const provider = cfg?.ai_provider?.current || 'qwen'
-        setCurrentProvider(provider)
-
-        const providerConfig = cfg?.ai_provider?.[provider]
-        if (providerConfig?.custom_models && providerConfig.custom_models.length > 0) {
-          setCurrentModel(providerConfig.custom_models[0])
-        } else {
-          setCurrentModel(providerConfig?.model || 'qwen-plus')
+        const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+        if (selected.provider) {
+          setCurrentProvider(selected.provider)
+          setCurrentModel(selected.model)
         }
       } else {
         console.error('加载配置失败:', result.error)
@@ -257,29 +350,28 @@ export default function Chat({ switchToAgent }) {
     loadConfig()
   }, [])
 
-  // 检查 Gateway 状态
   useEffect(() => {
-    const checkGateway = async () => {
-      // 🆕 使用统一 API 服务层
-      const result = await api.gateway.status()
-      if (result.success) {
-        setGatewayStatus(result.data)
-      } else {
-        console.error('检查 Gateway 状态失败:', result.error)
-        setGatewayStatus({ running: false })
+    const handleConfigUpdated = async () => {
+      const result = await api.config.get()
+      if (!result.success) return
+      const cfg = result.data
+      setConfig(cfg)
+      const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+      if (selected.provider) {
+        setCurrentProvider(selected.provider)
+        setCurrentModel(selected.model)
       }
     }
-
-    checkGateway()
-    const interval = setInterval(checkGateway, 30000)
-    return () => clearInterval(interval)
-  }, [])
+    window.addEventListener('openclaw:config-updated', handleConfigUpdated)
+    return () => window.removeEventListener('openclaw:config-updated', handleConfigUpdated)
+  }, [currentModel, currentProvider])
 
   // 🔥 用于事件处理的 ref（避免闭包问题）
   const lastUsageRef = useRef(null)
   const isLoadingHistoryRef = useRef(false)
   const currentSessionKeyRef = useRef(currentSessionKey)
   const historyLoadTimeoutRef = useRef(null) // 🔥 用于 setTimeout cleanup
+  const runTextCacheRef = useRef(new Map())
 
   // 保持 ref 同步
   useEffect(() => {
@@ -435,7 +527,11 @@ export default function Chat({ switchToAgent }) {
   // 🔥 处理智能体主动消息事件
   const handleProactiveMessage = useCallback((event) => {
     try {
-      const { message, timestamp, session_key } = event.payload
+      const payload = event?.payload || event || {}
+      const message = payload.message || payload.text || payload.content
+      const timestamp = payload.timestamp
+      const session_key = payload.session_key || payload.sessionKey
+      if (!message || typeof message !== 'string') return
       console.log('🤖 收到智能体主动消息:', message, timestamp, session_key)
 
       // 如果消息属于当前会话，直接添加到消息列表
@@ -466,10 +562,100 @@ export default function Chat({ switchToAgent }) {
     }
   }, [])
 
-  // 🔥 使用 useTauriEvents 监听事件
-  useTauriEvents({
-    'chat:chunk': handleChatChunk,
-    'proactive-message': handleProactiveMessage,
+  // 监听 Gateway chat 事件（原版协议：chat.send 返回 ack，增量通过 chat event 推送）
+  useEffect(() => {
+    const gateway = getGateway()
+
+    const handleGatewayChatEvent = (payload) => {
+      if (!payload || typeof payload !== 'object') return
+
+      const eventSessionKey = normalizeSessionKey(payload.sessionKey || payload.session_key || 'main')
+      const activeSessionKey = normalizeSessionKey(currentSessionKeyRef.current || 'main')
+
+      // 非当前会话：仅在结束态增加未读
+      const stateRaw = typeof payload.state === 'string'
+        ? payload.state.toLowerCase()
+        : (typeof payload.phase === 'string' ? payload.phase.toLowerCase() : '')
+      const isDone = payload.done === true || payload.is_last === true
+      const hasError = Boolean(payload.error || payload.errorMessage)
+      const resolvedState = stateRaw || (hasError ? 'error' : (isDone ? 'final' : 'delta'))
+
+      if (eventSessionKey !== activeSessionKey) {
+        if (resolvedState === 'final' || resolvedState === 'error' || resolvedState === 'aborted') {
+          setUnreadCounts((prev) => ({
+            ...prev,
+            [eventSessionKey]: (prev[eventSessionKey] || 0) + 1,
+          }))
+        }
+        return
+      }
+
+      const runId = typeof payload.runId === 'string' ? payload.runId : ''
+      const fullText = extractTextFromGatewayMessage(payload.message)
+      const prevText = runId ? (runTextCacheRef.current.get(runId) || '') : ''
+      const nextChunk = fullText && fullText.startsWith(prevText) ? fullText.slice(prevText.length) : fullText
+
+      if (runId) {
+        if (resolvedState === 'delta') {
+          runTextCacheRef.current.set(runId, fullText || prevText)
+        } else if (resolvedState === 'final' || resolvedState === 'error' || resolvedState === 'aborted') {
+          runTextCacheRef.current.delete(runId)
+        }
+      }
+
+      if (resolvedState === 'delta') {
+        handleChatChunk({
+          payload: {
+            content: nextChunk || '',
+            is_last: false,
+            usage: payload.usage || null,
+          },
+        })
+        return
+      }
+
+      if (resolvedState === 'final') {
+        handleChatChunk({
+          payload: {
+            content: nextChunk || '',
+            is_last: true,
+            usage: payload.usage || null,
+          },
+        })
+        return
+      }
+
+      if (resolvedState === 'error' || resolvedState === 'aborted') {
+        const errorText = payload.errorMessage ? `\n${payload.errorMessage}` : ''
+        handleChatChunk({
+          payload: {
+            content: errorText,
+            is_last: true,
+            usage: payload.usage || null,
+          },
+        })
+        return
+      }
+
+      // 未知状态兜底：只要有内容就当作一次最终消息，避免“收到事件但界面无回复”
+      if (nextChunk) {
+        handleChatChunk({
+          payload: {
+            content: nextChunk,
+            is_last: true,
+            usage: payload.usage || null,
+          },
+        })
+      }
+    }
+
+    gateway.on('chat', handleGatewayChatEvent)
+    gateway.on('agent', handleProactiveMessage)
+
+    return () => {
+      gateway.off('chat', handleGatewayChatEvent)
+      gateway.off('agent', handleProactiveMessage)
+    }
   }, [handleChatChunk, handleProactiveMessage])
 
   // 🔥 监听会话更新事件（来自 SessionMemory 的删除操作）
@@ -480,7 +666,8 @@ export default function Chat({ switchToAgent }) {
         console.log('📢 收到会话更新事件:', sessionKey)
 
         // 如果更新的是当前会话，刷新历史
-        if (sessionKey === currentSessionKey || sessionKey === `agent:${currentSessionKey.split(':')[1]}:main`) {
+        const currentAgentId = parseAgentIdFromSessionKey(currentSessionKey)
+        if (sessionKey === currentSessionKey || sessionKey === `agent:${currentAgentId}:main`) {
           console.log('🔄 刷新当前会话历史:', currentSessionKey)
           await loadSessionHistory(currentSessionKey)
         }
@@ -576,55 +763,90 @@ export default function Chat({ switchToAgent }) {
   const loadGatewaySessions = async () => {
     try {
       setIsLoadingSessions(true)
-      // 🆕 使用统一 API 服务层
-      const result = await api.sessions.list()
-      if (result.success) {
-        // 🔥 按智能体去重：每个智能体只显示一个条目（优先显示 main 会话）
-        const agentMap = new Map()
+      const [sessionsResult, agentsResult] = await Promise.all([
+        api.sessions.list(),
+        api.agents.list(),
+      ])
 
-        console.log('📋 原始会话列表:', result.data)
+      const sessions = sessionsResult.success && Array.isArray(sessionsResult.data)
+        ? sessionsResult.data
+        : []
+      const agents = agentsResult.success && Array.isArray(agentsResult.data)
+        ? agentsResult.data
+        : []
 
-        for (const session of result.data) {
-          // 🔥 严格过滤掉重复的默认助手：main, agent:main, agent:main:main
-          if (session.session_key === 'main' ||
-              session.session_key === 'agent:main' ||
-              session.session_key === 'agent:main:main') {
-            // 如果没有 main 会话记录，保存 main；否则跳过
-            if (!agentMap.has('main')) {
-              agentMap.set('main', { ...session, session_key: 'main' })
-            }
-            continue
+      if (!sessionsResult.success) {
+        console.error('加载 Gateway 会话失败:', sessionsResult.error)
+      }
+      if (!agentsResult.success) {
+        console.error('加载智能体列表失败:', agentsResult.error)
+      }
+
+      const agentMap = new Map()
+
+      console.log('📋 原始会话列表:', sessions)
+
+      for (const session of sessions) {
+        const sessionKey = typeof session?.session_key === 'string' ? session.session_key : ''
+        if (!sessionKey) continue
+
+        // 过滤重复 main 会话
+        if (sessionKey === 'main' || sessionKey === 'agent:main' || sessionKey === 'agent:main:main') {
+          if (!agentMap.has('main')) {
+            agentMap.set('main', { ...session, session_key: 'main' })
           }
-
-          // 解析其他智能体的 agent_id
-          let agentId = 'main'
-          if (session.session_key.startsWith('agent:')) {
-            const parts = session.session_key.replace('agent:', '').split(':')
-            agentId = parts[0] || 'main'
-          }
-
-          // 如果该智能体还没有记录，或者当前会话是 main 会话，则使用此会话
-          if (!agentMap.has(agentId) || session.session_key.endsWith(':main')) {
-            agentMap.set(agentId, session)
-          }
+          continue
         }
 
-        const uniqueSessions = Array.from(agentMap.values())
-        // 🔥 排序：main 智能体在最上面，其他按创建顺序
-        uniqueSessions.sort((a, b) => {
-          if (a.session_key === 'main') return -1
-          if (b.session_key === 'main') return 1
-          return 0
-        })
-        setGatewaySessions(uniqueSessions)
-        console.log('加载 Gateway 会话（去重后）:', uniqueSessions.length, '个')
-
-        // 🔥 加载所有智能体的名称缓存
-        await loadAgentNames(uniqueSessions)
-      } else {
-        console.error('加载 Gateway 会话失败:', result.error)
-        setGatewaySessions([])
+        const agentId = parseAgentIdFromSessionKey(sessionKey)
+        if (!agentMap.has(agentId) || sessionKey.endsWith(':main')) {
+          agentMap.set(agentId, session)
+        }
       }
+
+      // 合并智能体列表：补齐“有智能体但暂无会话”的条目
+      for (const agent of agents) {
+        const agentId = String(agent?.id || '').trim()
+        if (!agentId) continue
+        if (agentId === 'main') {
+          if (!agentMap.has('main')) {
+            agentMap.set('main', { session_key: 'main' })
+          }
+          continue
+        }
+        if (!agentMap.has(agentId)) {
+          agentMap.set(agentId, {
+            session_key: `agent:${agentId}:main`,
+            sessionKey: `agent:${agentId}:main`,
+            session_id: null,
+            created_at: null,
+            updated_at: null,
+          })
+        }
+      }
+
+      if (!agentMap.has('main')) {
+        agentMap.set('main', { session_key: 'main' })
+      }
+
+      const uniqueSessions = Array.from(agentMap.values()).filter((session) => {
+        return typeof session?.session_key === 'string' && session.session_key.trim()
+      })
+
+      // main 固定置顶，其余按 session_key 稳定排序，防止闪动
+      uniqueSessions.sort((a, b) => {
+        const keyA = a.session_key
+        const keyB = b.session_key
+        if (keyA === 'main') return -1
+        if (keyB === 'main') return 1
+        return keyA.localeCompare(keyB)
+      })
+
+      setGatewaySessions(uniqueSessions)
+      console.log('加载 Gateway 会话（合并智能体后）:', uniqueSessions.length, '个')
+
+      // 🔥 加载所有智能体的名称缓存
+      await loadAgentNames(uniqueSessions)
     } catch (err) {
       console.error('[loadGatewaySessions] 加载会话列表失败:', err)
       setGatewaySessions([])
@@ -652,7 +874,7 @@ export default function Chat({ switchToAgent }) {
       // 并行加载所有自定义智能体的名称（每个 promise 独立 try-catch）
       const loadPromises = sessions.map(async (session) => {
         try {
-          const sessionKey = session.session_key
+          const sessionKey = typeof session?.session_key === 'string' ? session.session_key : ''
           if (!sessionKey || sessionKey === 'main') return
 
           // 从 sessionKey 提取 agentId
@@ -699,7 +921,8 @@ export default function Chat({ switchToAgent }) {
       // 🆕 使用统一 API 服务层
       const result = await api.sessions.getMessages(normalizedKey)
       if (result.success) {
-        const formattedMessages = result.data.map(msg => {
+        const messageList = Array.isArray(result.data) ? result.data : []
+        const formattedMessages = messageList.map(msg => {
           // 解析时间戳，可能是字符串或数字
           let ts = null
           if (msg.timestamp) {
@@ -711,7 +934,7 @@ export default function Chat({ switchToAgent }) {
           }
           return {
             role: msg.role,
-            content: msg.content,
+            content: extractTextFromGatewayMessage(msg),
             timestamp: ts,
             usage: msg.usage || null  // 🔥 包含 token 使用量
           }
@@ -899,19 +1122,14 @@ export default function Chat({ switchToAgent }) {
 
       // 恢复该智能体的模型配置
       const meta = agentMetadata[sessionKey]
-      if (meta?.provider && meta?.model) {
-        setCurrentProvider(meta.provider)
-        setCurrentModel(meta.model)
-      } else {
-        // 没有配置则使用默认
-        const provider = config?.ai_provider?.current || 'qwen'
-        setCurrentProvider(provider)
-        const providerConfig = config?.ai_provider?.[provider]
-        if (providerConfig?.custom_models && providerConfig.custom_models.length > 0) {
-          setCurrentModel(providerConfig.custom_models[0])
-        } else {
-          setCurrentModel(providerConfig?.model || 'qwen-plus')
-        }
+      const selected = pickProviderSelection(
+        config?.ai_provider,
+        meta?.provider || '',
+        meta?.model || ''
+      )
+      if (selected.provider) {
+        setCurrentProvider(selected.provider)
+        setCurrentModel(selected.model)
       }
 
       // 加载会话历史
@@ -949,8 +1167,11 @@ export default function Chat({ switchToAgent }) {
 
       console.log('✅ 智能体创建成功:', createResult.data)
 
-      // 🔥 使用后端返回的真实 agent_id
-      const realAgentId = createResult.data?.agent_id
+      // 🔥 兼容不同后端字段：agent_id / agentId / id
+      const realAgentId =
+        createResult.data?.agent_id ||
+        createResult.data?.agentId ||
+        createResult.data?.id
       if (!realAgentId) {
         throw new Error('创建智能体失败：未返回 agent_id')
       }
@@ -1126,66 +1347,58 @@ export default function Chat({ switchToAgent }) {
       ? `[相关记忆上下文]\n${memoryContext}\n\n[用户问题]\n${inputText}`
       : inputText
 
-    if (useStreaming) {
-      // 流式聊天模式
-      console.log('🚀 发送流式消息到 Gateway, session_key:', sessionKey, '→ normalized:', normalizedSessionKey, 'provider:', provider, 'model:', model)
-      const result = await api.chat.sendStream({
-        message: enhancedMessage,
-        sessionKey: normalizedSessionKey,
-        provider: provider,
-        model: model
-      })
-      if (!result.success) {
-        const errorMessage = result.error || '未知错误'
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: `**抱歉，执行任务时遇到了问题：**\n\n\`\`\`\n${errorMessage}\n\`\`\`\n\n**建议**:\n1. 检查 Gateway 是否运行\n2. 检查设置中的 API Key 配置\n3. 尝试切换其他 AI 提供商`,
-          timestamp: Date.now()
-        }])
-        // 消息处理完成，继续处理队列
-        if (messageQueueRef.current.length > 0) {
-          await processNextMessage()
-        } else {
-          setIsLoading(false)
-          setIsStreaming(false)
-          setAgentStatus('')
-        }
-      }
-    } else {
-      // 非流式聊天模式
-      console.log('📨 发送非流式消息到 Gateway, session_key:', sessionKey, '→ normalized:', normalizedSessionKey, 'provider:', provider, 'model:', model)
-      const result = await api.chat.send({
-        message: enhancedMessage,
-        sessionKey: normalizedSessionKey,
-        provider: provider,
-        model: model
-      })
+    console.log('📨 发送消息到 Gateway, session_key:', sessionKey, '→ normalized:', normalizedSessionKey, 'provider:', provider, 'model:', model, 'streaming:', useStreaming)
+    const result = await api.chat.send({
+      message: enhancedMessage,
+      sessionKey: normalizedSessionKey,
+      provider: provider,
+      model: model
+    })
 
-      if (result.success && result.data && result.data.length > 0) {
-        const assistantMessage = result.data[0]
-        setMessages(prev => [...prev, {
-          role: 'assistant',
-          content: assistantMessage.content || '',
-          timestamp: Date.now(),
-          usage: assistantMessage.usage || null
-        }])
-
-        // 自动触发记忆同步
-        if (memorySyncEnabled) {
-          const currentMessageCount = messagesRef.current.length + 1
-          if (currentMessageCount - lastSyncMessageCount >= memorySyncInterval) {
-            api.memory.sync().catch(err => console.warn('记忆同步失败（静默）:', err))
-            setLastSyncMessageCount(currentMessageCount)
-          }
-        }
-      }
-      // 消息处理完成，继续处理队列
+    // chat.send 只返回 ACK，真正内容通过 Gateway `chat` 事件推送
+    if (!result.success) {
+      const errorMessage = result.error || '未知错误'
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: `**抱歉，执行任务时遇到了问题：**\n\n\`\`\`\n${errorMessage}\n\`\`\`\n\n**建议**:\n1. 检查 Gateway 是否运行\n2. 检查设置中的 API Key 配置\n3. 尝试切换其他 AI 提供商`,
+        timestamp: Date.now()
+      }])
       if (messageQueueRef.current.length > 0) {
         await processNextMessage()
       } else {
         setIsLoading(false)
+        setIsStreaming(false)
         setAgentStatus('')
       }
+    }
+  }
+
+  const resolveModelSetup = () => {
+    const providerConfigMap = config?.ai_provider
+    if (!providerConfigMap || typeof providerConfigMap !== 'object') {
+      return {
+        ready: false,
+        reason: '未读取到模型配置，请先在“模型设置”中配置。',
+        provider: '',
+        model: '',
+      }
+    }
+
+    const selected = pickProviderSelection(providerConfigMap, currentProvider, currentModel)
+    if (!selected.provider) {
+      return {
+        ready: false,
+        reason: '未选择可用模型提供商，请先在“模型设置”中配置。',
+        provider: '',
+        model: '',
+      }
+    }
+
+    return {
+      ready: true,
+      reason: '',
+      provider: selected.provider,
+      model: selected.model,
     }
   }
 
@@ -1194,14 +1407,23 @@ export default function Chat({ switchToAgent }) {
     const inputText = input.trim()
     if (!inputText) return
 
+    const modelSetup = resolveModelSetup()
+    if (!modelSetup.ready) {
+      toast.error('请先配置模型', modelSetup.reason)
+      return
+    }
+
+    const selectedProvider = modelSetup.provider || currentProvider
+    const selectedModel = modelSetup.model || currentModel
+
     // 如果正在处理消息，加入队列
     if (isLoading) {
       console.log('⏳ 消息加入队列，当前队列长度:', messageQueueRef.current.length + 1)
       const queuedMessage = {
         input: inputText,
         sessionKey: currentSessionKey,
-        provider: currentProvider,
-        model: currentModel
+        provider: selectedProvider,
+        model: selectedModel
       }
       messageQueueRef.current = [...messageQueueRef.current, queuedMessage]
       setMessageQueue([...messageQueueRef.current])
@@ -1221,22 +1443,8 @@ export default function Chat({ switchToAgent }) {
       setStreamingContent('')
     }
 
-    // 检查 Gateway 状态
-    if (!gatewayStatus?.running || !gatewayStatus?.websocket_connected) {
-      const reason = !gatewayStatus?.running ? 'Gateway 未运行' : 'Gateway WebSocket 未连接'
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: `**Gateway 不可用**: ${reason}\n\n请先点击左侧"启动 Gateway"按钮。`,
-        timestamp: Date.now()
-      }])
-      setIsLoading(false)
-      setIsStreaming(false)
-      setAgentStatus('')
-      return
-    }
-
     // 执行发送
-    await executeSendMessage(inputText, currentSessionKey, currentProvider, currentModel)
+    await executeSendMessage(inputText, currentSessionKey, selectedProvider, selectedModel)
   }
 
   // 格式化工具调用显示
@@ -1285,33 +1493,39 @@ export default function Chat({ switchToAgent }) {
 
   // 获取已启用的提供商列表
   const getEnabledProviders = () => {
-    if (!config?.ai_provider) return []
-    const providers = []
-    for (const [id, cfg] of Object.entries(config.ai_provider)) {
-      if (id === 'current' || id === 'embedding') continue
-      if (cfg?.enabled && cfg?.api_key) {
-        providers.push({
-          id,
-          name: providerInfo[id]?.name || id,
-          color: providerInfo[id]?.color || 'text-gray-500',
-          bgColor: providerInfo[id]?.bgColor || 'bg-gray-500',
-          models: cfg.custom_models || (cfg.model ? [cfg.model] : [])
-        })
-      }
-    }
-    return providers
+    const configured = getConfiguredProviderEntries(config?.ai_provider)
+    return configured.map(({ id, models }) => ({
+      id,
+      name: providerInfo[id]?.name || id,
+      color: providerInfo[id]?.color || 'text-gray-500',
+      bgColor: providerInfo[id]?.bgColor || 'bg-gray-500',
+      models,
+    }))
   }
 
   // 获取当前提供商的所有模型
-  const getAvailableModels = () => {
-    if (!config?.ai_provider?.[currentProvider]) return []
-    const providerConfig = config.ai_provider[currentProvider]
-    return providerConfig.custom_models || (providerConfig.model ? [providerConfig.model] : [])
+  const getAvailableModels = (providerId) => {
+    if (!providerId || !config?.ai_provider?.[providerId]) return []
+    return collectProviderModels(config.ai_provider[providerId])
   }
 
   const enabledProviders = getEnabledProviders()
-  const availableModels = getAvailableModels()
-  const currentProviderInfo = providerInfo[currentProvider] || { name: currentProvider, color: 'text-gray-500' }
+  const effectiveProvider = enabledProviders.some((p) => p.id === currentProvider)
+    ? currentProvider
+    : (enabledProviders[0]?.id || currentProvider)
+  const availableModels = getAvailableModels(effectiveProvider)
+  const availableModelsKey = availableModels.join('|')
+  const modelSetupState = resolveModelSetup()
+  const currentProviderInfo = providerInfo[effectiveProvider] || { name: effectiveProvider, color: 'text-gray-500' }
+
+  useEffect(() => {
+    if (effectiveProvider && effectiveProvider !== currentProvider) {
+      setCurrentProvider(effectiveProvider)
+    }
+    if (availableModels.length > 0 && !availableModels.includes(currentModel)) {
+      setCurrentModel(availableModels[0])
+    }
+  }, [effectiveProvider, currentProvider, currentModel, availableModels, availableModelsKey])
 
   return (
     <div className="h-full flex flex-col bg-surface">
@@ -1350,16 +1564,11 @@ export default function Chat({ switchToAgent }) {
 
                 {/* 提供商选择 */}
                 <Select
-                  value={currentProvider}
+                  value={effectiveProvider || '_none'}
                   onValueChange={(value) => {
                     setCurrentProvider(value)
-                    const providerConfig = config?.ai_provider?.[value]
-                    let newModel = ''
-                    if (providerConfig?.custom_models && providerConfig.custom_models.length > 0) {
-                      newModel = providerConfig.custom_models[0]
-                    } else {
-                      newModel = providerConfig?.model || ''
-                    }
+                    const models = getAvailableModels(value)
+                    const newModel = models[0] || ''
                     setCurrentModel(newModel)
                     saveCurrentAgentModel(value, newModel)
                   }}
@@ -1387,7 +1596,7 @@ export default function Chat({ switchToAgent }) {
                   value={currentModel}
                   onValueChange={(value) => {
                     setCurrentModel(value)
-                    saveCurrentAgentModel(currentProvider, value)
+                    saveCurrentAgentModel(effectiveProvider, value)
                   }}
                   disabled={availableModels.length <= 1}
                 >
@@ -1523,23 +1732,30 @@ export default function Chat({ switchToAgent }) {
 
           {/* 输入区域 - 与 Sidebar/ChatDrawer 高度对齐 */}
           <div className="min-h-14 md:min-h-16 flex items-center px-2 sm:px-3 md:px-4 border-t border-border">
-            <div className="flex gap-2 sm:gap-2.5 md:gap-3 items-end w-full max-w-full sm:max-w-2xl md:max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
-              <Textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="输入消息... (Shift+Enter 换行)"
-                className="flex-1 resize-none min-h-[36px] sm:min-h-[40px] md:min-h-[44px] max-h-[120px] sm:max-h-[150px] md:max-h-[200px] text-sm md:text-base"
-                rows={1}
-              />
-              <Button
-                onClick={sendMessage}
-                disabled={!input.trim() || isLoading}
-                className="h-9 sm:h-10 md:h-11 px-2.5 sm:px-3 md:px-4"
-              >
-                <Send className="w-4 h-4 md:mr-2" />
-                <span className="hidden md:inline">发送</span>
-              </Button>
+            <div className="w-full max-w-full sm:max-w-2xl md:max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
+              {!modelSetupState.ready && (
+                <div className="mb-1 text-xs text-amber-600">
+                  {modelSetupState.reason}
+                </div>
+              )}
+              <div className="flex gap-2 sm:gap-2.5 md:gap-3 items-end">
+                <Textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder={modelSetupState.ready ? '输入消息... (Shift+Enter 换行)' : '请先在“模型设置”中配置可用模型'}
+                  className="flex-1 resize-none min-h-[36px] sm:min-h-[40px] md:min-h-[44px] max-h-[120px] sm:max-h-[150px] md:max-h-[200px] text-sm md:text-base"
+                  rows={1}
+                />
+                <Button
+                  onClick={sendMessage}
+                  disabled={!input.trim() || isLoading || !modelSetupState.ready}
+                  className="h-9 sm:h-10 md:h-11 px-2.5 sm:px-3 md:px-4"
+                >
+                  <Send className="w-4 h-4 md:mr-2" />
+                  <span className="hidden md:inline">发送</span>
+                </Button>
+              </div>
             </div>
           </div>
         </div>
@@ -1556,13 +1772,10 @@ export default function Chat({ switchToAgent }) {
             if (result.success) {
               const cfg = result.data
               setConfig(cfg)
-              const provider = cfg?.ai_provider?.current || 'qwen'
-              setCurrentProvider(provider)
-              const providerConfig = cfg?.ai_provider?.[provider]
-              if (providerConfig?.custom_models && providerConfig.custom_models.length > 0) {
-                setCurrentModel(providerConfig.custom_models[0])
-              } else {
-                setCurrentModel(providerConfig?.model || 'qwen-plus')
+              const selected = pickProviderSelection(cfg?.ai_provider, currentProvider, currentModel)
+              if (selected.provider) {
+                setCurrentProvider(selected.provider)
+                setCurrentModel(selected.model)
               }
             }
           }}

@@ -55,6 +55,26 @@ export default function DevicePairing() {
   const [manualCode, setManualCode] = useState('')
   const [activeTab, setActiveTab] = useState('pairing')
 
+  /**
+   * 将不稳定的 API 响应统一为数组
+   * 支持：数组 / { requests: [] } / { items: [] } / 对象映射
+   */
+  const normalizeArray = (value, preferredKeys = []) => {
+    if (Array.isArray(value)) return value
+    if (!value || typeof value !== 'object') return []
+
+    for (const key of preferredKeys) {
+      if (Array.isArray(value[key])) {
+        return value[key]
+      }
+    }
+
+    return Object.values(value).filter(item => item && typeof item === 'object')
+  }
+
+  const safePendingRequests = Array.isArray(pendingRequests) ? pendingRequests : []
+  const safePairedDevices = Array.isArray(pairedDevices) ? pairedDevices : []
+
   // 加载配对数据
   useEffect(() => {
     loadData()
@@ -83,7 +103,16 @@ export default function DevicePairing() {
       const result = await api.devicePair.list()
 
       if (result.success && result.data) {
-        setPendingRequests(result.data.requests || result.data || [])
+        const rawRequests = normalizeArray(result.data, ['requests', 'pending', 'items'])
+        const normalizedRequests = rawRequests.map((request, index) => ({
+          id: request?.id || request?.requestId || request?.request_id || `request-${index}`,
+          deviceName: request?.deviceName || request?.device_name || request?.name || request?.device?.name || '未知设备',
+          platform: request?.platform || request?.device?.platform || '未知平台',
+          requestedAt: request?.requestedAt || request?.createdAt || request?.requested_at || request?.created_at || new Date().toISOString(),
+          ipAddress: request?.ipAddress || request?.ip || request?.device?.ipAddress || request?.device?.ip || '-',
+          status: request?.status || 'pending',
+        }))
+        setPendingRequests(normalizedRequests)
       } else {
         // 使用模拟数据
         setPendingRequests(getMockPendingRequests())
@@ -103,8 +132,22 @@ export default function DevicePairing() {
 
       if (result.success && result.data) {
         // 从 secrets 中筛选设备令牌
-        const tokens = result.data.secrets || result.data || []
-        setPairedDevices(tokens.filter(t => t.type === 'device_token' || t.key?.startsWith('device_')) || getMockPairedDevices())
+        const tokensFromList = normalizeArray(result.data, ['secrets', 'items'])
+        let tokens = tokensFromList
+
+        // 兼容 secrets 为对象映射（{ key: value }）的场景
+        if (tokens.length === 0 && result.data && typeof result.data === 'object' && !Array.isArray(result.data)) {
+          tokens = Object.entries(result.data).map(([key, value]) => ({
+            key,
+            value,
+            type: typeof key === 'string' && key.startsWith('device_') ? 'device_token' : undefined,
+            deviceName: key,
+            createdAt: null,
+          }))
+        }
+
+        const devices = tokens.filter(t => t?.type === 'device_token' || t?.key?.startsWith('device_'))
+        setPairedDevices(devices)
       } else {
         // 使用模拟数据
         setPairedDevices(getMockPairedDevices())
@@ -491,8 +534,8 @@ export default function DevicePairing() {
             <CardTitle className="flex items-center gap-2">
               <Clock className="w-5 h-5" />
               待审批请求
-              {pendingRequests.length > 0 && (
-                <Badge variant="secondary">{pendingRequests.length}</Badge>
+              {safePendingRequests.length > 0 && (
+                <Badge variant="secondary">{safePendingRequests.length}</Badge>
               )}
             </CardTitle>
             <CardDescription>
@@ -500,14 +543,14 @@ export default function DevicePairing() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {pendingRequests.length === 0 ? (
+            {safePendingRequests.length === 0 ? (
               <div className="py-8 text-center">
                 <CheckCircle className="w-12 h-12 mx-auto text-foreground-tertiary mb-4" />
                 <p className="text-foreground-secondary">暂无待审批请求</p>
               </div>
             ) : (
               <div className="space-y-3">
-                {pendingRequests.map((request) => (
+                {safePendingRequests.map((request) => (
                   <div
                     key={request.id}
                     className="p-4 border border-subtle rounded-lg hover:bg-surface-elevated transition-colors"
@@ -593,14 +636,14 @@ export default function DevicePairing() {
           </div>
         </CardHeader>
         <CardContent>
-          {pairedDevices.length === 0 ? (
+          {safePairedDevices.length === 0 ? (
             <div className="py-8 text-center">
               <Monitor className="w-12 h-12 mx-auto text-foreground-tertiary mb-4" />
               <p className="text-foreground-secondary">暂无已配对设备</p>
             </div>
           ) : (
             <div className="divide-y divide-subtle">
-              {pairedDevices.map((device) => (
+              {safePairedDevices.map((device) => (
                 <div
                   key={device.id}
                   className="flex items-center justify-between py-4 first:pt-0 last:pb-0"

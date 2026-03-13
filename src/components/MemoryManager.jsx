@@ -15,6 +15,17 @@ import {
 import api from '@/lib/api'
 import { toast } from '@/hooks/useToast'
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 /**
  * MemoryManager - 长期记忆管理组件
  * 管理和查看 Agent 的长期记忆存储
@@ -31,7 +42,8 @@ export default function MemoryManager() {
     setLoading(true)
     const result = await api.memory.list()
     if (result.success) {
-      setMemories(result.data?.memories || [])
+      const rows = normalizeArray(result.data, ['memories', 'items', 'results', 'list'])
+      setMemories(rows)
     } else {
       console.error('加载记忆列表失败:', result.error)
       setMemories([])
@@ -63,7 +75,8 @@ export default function MemoryManager() {
     setIsSearching(true)
     const result = await api.memory.searchGateway(searchQuery, 20)
     if (result.success) {
-      setMemories(result.data?.results || [])
+      const rows = normalizeArray(result.data, ['results', 'items', 'memories', 'list'])
+      setMemories(rows)
     } else {
       console.error('搜索记忆失败:', result.error)
       toast.error('搜索失败', result.error)

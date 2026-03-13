@@ -65,67 +65,121 @@ function App() {
   // 自动更新 Hook
   const { hasUpdate } = useAutoUpdate()
 
+  const isTauriRuntime = () => {
+    if (typeof window === 'undefined') return false
+    return Boolean(window.__TAURI_INTERNALS__ || window.__TAURI__?.core)
+  }
+
   useEffect(() => {
     // 🔥 清理旧的 localStorage 缓存（迁移到 Workspace 系统）
     localStorage.removeItem('agent_metadata')
 
-    // 🔥 首先确保 OpenClaw 已安装并运行
-    ensureOpenClawReady()
-    // 加载数据
-    loadConfig()
-    loadSystemInfo()
-    loadUserSettings()
+    // 🔥 初始化流程：先确保 Gateway 准备就绪，再加载数据
+    const init = async () => {
+      // 1. 首先确保 OpenClaw 已安装并运行（包含设置 auth token）
+      if (isTauriRuntime()) {
+        await ensureOpenClawReady()
+      } else {
+        console.log('🌐 非 Tauri 运行环境，跳过安装/进程初始化')
+      }
+      // 2. Gateway 准备就绪后，再加载其他数据
+      loadConfig()
+      loadSystemInfo()
+      loadUserSettings()
+    }
+    init()
   }, [])
 
   // 🔥 确保 OpenClaw 已安装并运行
   const ensureOpenClawReady = async () => {
+    if (!isTauriRuntime()) return
+
+    // 防止重复调用（防抖标记）
+    if (window.__gatewayStarting) {
+      console.log('⏳ Gateway 启动中，跳过重复请求')
+      return
+    }
+
     // 如果正在显示引导，不需要自动启动（引导流程会处理）
     if (showOnboarding) return
 
-    console.log('🔍 检查 OpenClaw 安装状态...')
-    setInstallError(null)
+    // 设置防抖标记
+    window.__gatewayStarting = true
 
-    // 1. 检查 OpenClaw 是否安装
-    const checkResult = await api.install.checkStatus()
-    if (!checkResult.success) {
-      console.error('❌ 检查安装状态失败:', checkResult.error)
+    try {
+      console.log('🔍 检查 OpenClaw 安装状态...')
+      setInstallError(null)
+
+      // 1. 检查 OpenClaw 是否安装
+      const checkResult = await api.install.checkStatus()
+      if (!checkResult.success) {
+        console.error('❌ 检查安装状态失败:', checkResult.error)
+        setInstallStatus(false)
+        setInstallError(checkResult.error)
+        return
+      }
+
+      console.log('📦 OpenClaw 安装状态:', checkResult.data)
+
+      // 如果已安装，直接启动 Gateway
+      if (checkResult.data?.installed) {
+        setInstallStatus(true)
+        await startGatewayIfNeeded()
+        return
+      }
+
+      // 2. 未安装，自动安装
+      console.log('⬇️ OpenClaw 未安装，开始自动安装...')
       setInstallStatus(false)
-      setInstallError(checkResult.error)
-      return
-    }
+      setIsInstalling(true)
 
-    console.log('📦 OpenClaw 安装状态:', checkResult.data)
+      const installResult = await api.install.install()
+      setIsInstalling(false)
 
-    // 如果已安装，直接启动 Gateway
-    if (checkResult.data?.installed) {
-      setInstallStatus(true)
-      await startGatewayIfNeeded()
-      return
-    }
-
-    // 2. 未安装，自动安装
-    console.log('⬇️ OpenClaw 未安装，开始自动安装...')
-    setInstallStatus(false)
-    setIsInstalling(true)
-
-    const installResult = await api.install.install()
-    setIsInstalling(false)
-
-    if (installResult.success && installResult.data?.installed) {
-      console.log('✅ OpenClaw 安装成功!')
-      setInstallStatus(true)
-      // 安装成功后启动 Gateway
-      await startGatewayIfNeeded()
-    } else {
-      console.error('❌ OpenClaw 安装失败:', installResult.error || installResult.data?.error)
-      setInstallError(installResult.error || installResult.data?.error || '安装失败')
+      if (installResult.success && installResult.data?.installed) {
+        console.log('✅ OpenClaw 安装成功!')
+        setInstallStatus(true)
+        // 安装成功后启动 Gateway
+        await startGatewayIfNeeded()
+      } else {
+        console.error('❌ OpenClaw 安装失败:', installResult.error || installResult.data?.error)
+        setInstallError(installResult.error || installResult.data?.error || '安装失败')
+      }
+    } finally {
+      // 清除防抖标记
+      window.__gatewayStarting = false
     }
   }
 
   // 🔥 启动 Gateway（如果未运行）
   const startGatewayIfNeeded = async () => {
     const statusResult = await api.bundledGateway.status()
+    if (!statusResult.success) {
+      // 状态命令失败时，先探测现有 Gateway；若不存在再尝试启动 bundled
+      const probeResult = await api.call('health', {}, { silent: true })
+      if (probeResult.success) {
+        console.log('✅ Gateway 可访问（状态命令失败但服务可用），继续使用')
+        return
+      }
+
+      console.warn('⚠️ 读取 Gateway 状态失败，尝试直接启动 bundled Gateway...')
+      const startResult = await api.bundledGateway.start()
+      if (startResult.success) {
+        console.log('✅ Gateway 启动成功（状态失败兜底路径）')
+      } else {
+        console.error('❌ Gateway 启动失败（状态失败兜底路径）:', startResult.error)
+      }
+      return
+    }
+
     if (statusResult.success && !statusResult.data?.running) {
+      // 兜底：如果已有外部 Gateway 在 18789 运行，则直接复用，不再强制启动 bundled 进程
+      const probeResult = await api.call('health', {}, { silent: true })
+      if (probeResult.success) {
+        console.log('✅ 检测到已运行的 Gateway（外部进程），直接复用')
+        return
+      }
+
       console.log('🔄 Gateway 未运行，自动启动中...')
       const startResult = await api.bundledGateway.start()
       if (startResult.success) {
@@ -175,8 +229,8 @@ function App() {
   }
 
   const loadSystemInfo = async () => {
-    // 🆕 使用统一 API 服务层
-    const result = await api.system.getInfo()
+    // 使用统一 API 服务层（方法名是 info 不是 getInfo）
+    const result = await api.system.info()
     if (result.success) {
       setSystemInfo(result.data)
     } else {

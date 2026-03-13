@@ -60,7 +60,7 @@ const AI_PROVIDERS = [
   { id: 'qwen', name: '🇨🇳 通义千问', defaultUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
   { id: 'deepseek', name: '🇨🇳 DeepSeek', defaultUrl: 'https://api.deepseek.com/v1' },
   { id: 'zhipu', name: '🇨🇳 智谱 GLM', defaultUrl: 'https://open.bigmodel.cn/api/paas/v4' },
-  { id: 'minimax', name: '🇨🇳 MiniMax', defaultUrl: 'https://api.minimaxi.com/v1' },
+  { id: 'minimax', name: '🇨🇳 MiniMax', defaultUrl: 'https://api.minimaxi.com/anthropic' },
   { id: 'moonshot', name: '🇨🇳 月之暗面', defaultUrl: 'https://api.moonshot.cn/v1' },
   { id: 'doubao', name: '🇨🇳 豆包', defaultUrl: 'https://ark.cn-beijing.volces.com/api/v3' },
   { id: 'ernie', name: '🇨🇳 文心一言', defaultUrl: '' },

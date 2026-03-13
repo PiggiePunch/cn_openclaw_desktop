@@ -43,6 +43,17 @@ const STATUS_CONFIG = {
   error: { color: 'text-red-600', bg: 'bg-red-50', icon: XCircle, label: '错误' },
 }
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 export default function A2ACommunication() {
   const [agents, setAgents] = useState([])
   const [stats, setStats] = useState(null)
@@ -72,16 +83,11 @@ export default function A2ACommunication() {
 
   const initA2A = async () => {
     setIsLoading(true)
-    // 🆕 使用统一 API 服务层
-    const result = await api.a2a.init()
-    if (result.success) {
-      setIsInitialized(true)
-      await loadAgents()
-      await loadStats()
-    } else {
-      console.error('初始化 A2A 失败:', result.error)
-      toast.error('初始化失败', result.error)
-    }
+    // Gateway 不支持 a2a.init 方法，直接加载数据
+    console.log('A2A 通信模块初始化，直接加载数据')
+    setIsInitialized(true)
+    await loadAgents()
+    await loadStats()
     setIsLoading(false)
   }
 
@@ -90,9 +96,25 @@ export default function A2ACommunication() {
     // 🆕 使用统一 API 服务层
     const result = await api.a2a.list(null)
     if (result.success) {
-      setAgents(result.data || [])
+      const rawAgents = normalizeArray(result.data, ['agents', 'items', 'list'])
+      const normalizedAgents = rawAgents.map((agent, index) => {
+        const id = typeof agent?.id === 'string' && agent.id.trim()
+          ? agent.id.trim()
+          : `agent-${index}`
+
+        return {
+          ...agent,
+          id,
+          name: typeof agent?.name === 'string' && agent.name.trim() ? agent.name.trim() : id,
+          status: typeof agent?.status === 'string' ? agent.status : 'inactive',
+          description: typeof agent?.description === 'string' ? agent.description : '',
+          capabilities: Array.isArray(agent?.capabilities) ? agent.capabilities : [],
+        }
+      })
+      setAgents(normalizedAgents)
     } else {
       console.error('加载 Agent 列表失败:', result.error)
+      setAgents([])
     }
     setIsLoading(false)
   }
@@ -194,7 +216,8 @@ export default function A2ACommunication() {
     )
   }
 
-  const filteredAgents = agents.filter(agent =>
+  const safeAgents = Array.isArray(agents) ? agents : []
+  const filteredAgents = safeAgents.filter(agent =>
     agent.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
     agent.name.toLowerCase().includes(searchQuery.toLowerCase())
   )
@@ -231,7 +254,7 @@ export default function A2ACommunication() {
             <div className="flex items-center gap-2">
               <Badge variant="secondary" className="gap-1">
                 <Users className="w-3 h-3" />
-                {stats?.total_agents || agents.length}
+                {stats?.total_agents || safeAgents.length}
               </Badge>
               <Badge variant="secondary" className="gap-1 text-green-600">
                 <CheckCircle2 className="w-3 h-3" />
@@ -404,7 +427,7 @@ export default function A2ACommunication() {
           <div className="space-y-3">
             <div className="flex flex-wrap gap-1.5">
               {selectedAgents.map(id => {
-                const agent = agents.find(a => a.id === id)
+                const agent = safeAgents.find(a => a.id === id)
                 return (
                   <Badge key={id} variant="secondary" className="text-xs">
                     {agent?.name || id}
@@ -496,7 +519,7 @@ export default function A2ACommunication() {
             </DialogHeader>
             <div className="space-y-3">
               {callResult.results ? (
-                callResult.results.map((result, idx) => (
+                (Array.isArray(callResult.results) ? callResult.results : []).map((result, idx) => (
                   <div
                     key={idx}
                     className={`p-3 rounded-lg text-sm ${result.success ? 'bg-green-50' : 'bg-red-50'}`}
@@ -562,7 +585,7 @@ function NetworkDiscovery() {
     const tailscaleData = tailscaleRes.status === 'fulfilled' ? tailscaleRes.value : null
 
     setDiscoveryStatus(statusData?.success ? statusData.data : null)
-    setPeers(peersData?.success ? (peersData.data?.peers || []) : [])
+    setPeers(peersData?.success ? normalizeArray(peersData.data, ['peers', 'items', 'list']) : [])
     setTailscaleStatus(tailscaleData?.success ? tailscaleData.data : null)
     setLoading(false)
   }

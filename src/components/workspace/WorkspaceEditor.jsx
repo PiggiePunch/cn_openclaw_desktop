@@ -243,45 +243,112 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
   // 加载 Workspace 配置
   const loadWorkspace = async () => {
     setLoading(true)
-    const configResult = await api.workspace.load(agentId)
-    if (configResult.success) {
-      let config = configResult.data
-      // 如果选择的是 CHANNELS.md，读取并解析 channels
-      if (selectedFile === 'CHANNELS.md') {
-        try {
-          const contentResult = await api.workspace.readFile(agentId, 'CHANNELS.md')
-          if (contentResult.success && contentResult.data) {
-            // 解析 YAML 格式的 channels
-            const match = contentResult.data.match(/^---\nchannels:\s*(.+)\n---/s)
-            if (match) {
-              config = { ...config, channels: JSON.parse(match[1]) }
+    try {
+      const configResult = await api.workspace.load(agentId)
+      if (configResult.success) {
+        let config = configResult.data
+        // 如果选择的是 CHANNELS.md，读取并解析 channels
+        if (selectedFile === 'CHANNELS.md') {
+          try {
+            const contentResult = await api.workspace.readFile(agentId, 'CHANNELS.md')
+            if (contentResult.success && contentResult.data) {
+              // 解析 YAML 格式的 channels
+              const match = contentResult.data.match(/^---\nchannels:\s*(.+)\n---/s)
+              if (match) {
+                config = { ...config, channels: JSON.parse(match[1]) }
+              }
             }
+          } catch (e) {
+            console.error('解析 CHANNELS.md 失败:', e)
           }
-        } catch (e) {
-          console.error('解析 CHANNELS.md 失败:', e)
         }
-      }
-      setWorkspaceConfig(config)
-      if (selectedFile !== 'CHANNELS.md') {
-        const contentResult = await api.workspace.readFile(agentId, selectedFile)
-        if (contentResult.success) {
-          setFileContent(contentResult.data)
+        setWorkspaceConfig(config)
+        if (selectedFile !== 'CHANNELS.md') {
+          const contentResult = await api.workspace.readFile(agentId, selectedFile)
+          if (contentResult.success) {
+            setFileContent(contentResult.data)
+          } else {
+            setFileContent('')
+          }
         }
+      } else {
+        console.error('加载 Workspace 失败:', configResult.error)
+        setWorkspaceConfig({
+          identity: {
+            name: agentId === 'main' ? '默认助手' : agentId,
+            emoji: '🤖',
+          },
+          channels: [],
+          files: [],
+        })
+        setFileContent('')
       }
-    } else {
-      console.error('加载 Workspace 失败:', configResult.error)
+    } catch (error) {
+      console.error('加载 Workspace 异常:', error)
+      setWorkspaceConfig({
+        identity: {
+          name: agentId === 'main' ? '默认助手' : agentId,
+          emoji: '🤖',
+        },
+        channels: [],
+        files: [],
+      })
+      setFileContent('')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   // 加载智能体列表
   const loadAgents = async () => {
     const result = await api.agents.list()
     if (result.success) {
-      setAgents(Array.isArray(result.data) ? result.data : [])
+      const rawAgents = Array.isArray(result.data) ? result.data : []
+      const normalized = rawAgents
+        .map((entry) => {
+          if (Array.isArray(entry)) {
+            const [id, identity] = entry
+            if (!id) return null
+            return { id, identity: identity || {} }
+          }
+
+          if (entry && typeof entry === 'object' && entry.id) {
+            return {
+              id: entry.id,
+              identity: {
+                name: entry.name || entry.display_name || entry.id,
+                emoji: entry.emoji || '🤖',
+                description: entry.description || '',
+                ...entry.identity,
+              },
+            }
+          }
+
+          return null
+        })
+        .filter(Boolean)
+      const hasMain = normalized.some((agent) => agent.id === 'main')
+      setAgents(hasMain
+        ? normalized
+        : [{
+          id: 'main',
+          identity: {
+            name: '默认助手',
+            emoji: '🤖',
+            description: '',
+          },
+        }, ...normalized]
+      )
     } else {
       console.error('加载智能体列表失败:', result.error)
-      setAgents([])
+      setAgents([{
+        id: 'main',
+        identity: {
+          name: '默认助手',
+          emoji: '🤖',
+          description: '',
+        },
+      }])
     }
   }
 
@@ -429,7 +496,9 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
         <CardContent className="p-0 flex-1 min-h-0">
           <ScrollArea className="h-full">
             <div className="p-2 space-y-1">
-              {agents.map(([id, identity]) => {
+              {agents.map((agent) => {
+                const id = agent.id
+                const identity = agent.identity || {}
                 const isSelected = agentId === id
                 return (
                   <button
@@ -623,8 +692,8 @@ export default function WorkspaceEditor({ onSwitchAgent }) {
                   // 调用后端 API 保存通道配置
                   const result = await api.workspace.saveFile(agentId, 'CHANNELS.md', `---\nchannels: ${JSON.stringify(channels)}\n---`)
                   if (result.success) {
-                    // 同时更新 Agent 的 channels 字段
-                    await api.agent.update(agentId, null, null, null, channels)
+                    // 尝试同步更新 Agent 的 channels 字段（旧 Gateway 可能不支持）
+                    await api.agents.update(agentId, { channels })
                     setSaveStatus('saved')
                     await loadWorkspace()
                     setTimeout(() => setSaveStatus(null), 2000)

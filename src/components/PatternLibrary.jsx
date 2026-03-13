@@ -73,6 +73,17 @@ const typeLabels = {
   [PatternType.Anti]: '反模式',
 }
 
+const normalizeArray = (value, preferredKeys = []) => {
+  if (Array.isArray(value)) return value
+  if (!value || typeof value !== 'object') return []
+
+  for (const key of preferredKeys) {
+    if (Array.isArray(value[key])) return value[key]
+  }
+
+  return Object.values(value).filter(item => item && typeof item === 'object')
+}
+
 /**
  * 模式库管理组件
  */
@@ -103,10 +114,12 @@ export default function PatternLibrary() {
     // 🆕 使用新的 patterns.list API
     const result = await api.patterns.list({ limit: 200 })
     if (result.success) {
-      setPatterns(result.data?.patterns || [])
+      const rows = normalizeArray(result.data, ['patterns', 'items', 'list'])
+      setPatterns(rows)
     } else {
       console.error('加载模式失败:', result.error)
       toast.error('加载失败', result.error)
+      setPatterns([])
     }
     setLoading(false)
   }
@@ -128,10 +141,13 @@ export default function PatternLibrary() {
     // 搜索筛选
     if (searchQuery) {
       const query = searchQuery.toLowerCase()
+      const name = typeof pattern?.name === 'string' ? pattern.name.toLowerCase() : ''
+      const description = typeof pattern?.description === 'string' ? pattern.description.toLowerCase() : ''
+      const tags = Array.isArray(pattern?.tags) ? pattern.tags : []
       return (
-        pattern.name.toLowerCase().includes(query) ||
-        pattern.description.toLowerCase().includes(query) ||
-        pattern.tags?.some((tag) => tag.toLowerCase().includes(query))
+        name.includes(query) ||
+        description.includes(query) ||
+        tags.some((tag) => String(tag).toLowerCase().includes(query))
       )
     }
     return true
@@ -231,7 +247,7 @@ export default function PatternLibrary() {
           <p className="text-sm text-foreground-secondary line-clamp-2">
             {pattern.description}
           </p>
-          {pattern.tags && pattern.tags.length > 0 && (
+          {Array.isArray(pattern.tags) && pattern.tags.length > 0 && (
             <div className="flex flex-wrap gap-1 mt-3">
               {pattern.tags.slice(0, 3).map((tag, idx) => (
                 <Badge key={idx} variant="outline" className="text-xs">
@@ -576,7 +592,7 @@ export default function PatternLibrary() {
                     </pre>
                   </div>
                 )}
-                {selectedPattern.tags && selectedPattern.tags.length > 0 && (
+                {Array.isArray(selectedPattern.tags) && selectedPattern.tags.length > 0 && (
                   <div>
                     <h4 className="text-sm font-medium text-foreground-secondary mb-2">标签</h4>
                     <div className="flex flex-wrap gap-2">
