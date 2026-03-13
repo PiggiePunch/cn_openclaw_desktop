@@ -290,6 +290,21 @@ pub struct LocalAgentWorkspace {
     pub files: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAgentDeleteResult {
+    pub agent_id: String,
+    pub removed_paths: Vec<String>,
+    pub missing_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSessionPurgeResult {
+    pub session_key: String,
+    pub removed_count: usize,
+    pub touched_files: Vec<String>,
+    pub missing_files: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AgentHint {
     workspace: Option<PathBuf>,
@@ -648,6 +663,62 @@ fn workspace_file_name_is_safe(file_name: &str) -> bool {
     name.ends_with(".md") || name.ends_with(".MD")
 }
 
+fn local_agent_id_is_safe(agent_id: &str) -> bool {
+    let id = agent_id.trim();
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn is_empty_object_json_file(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+    value
+        .as_object()
+        .map(|obj| obj.is_empty())
+        .unwrap_or(false)
+}
+
+fn is_ghost_agent_dir(agent_dir: &Path) -> bool {
+    if !agent_dir.is_dir() {
+        return false;
+    }
+
+    let Ok(entries) = fs::read_dir(agent_dir) else {
+        return false;
+    };
+    let names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
+        .collect();
+    if names.len() != 1 || names[0] != "sessions" {
+        return false;
+    }
+
+    let sessions_dir = agent_dir.join("sessions");
+    if !sessions_dir.is_dir() {
+        return false;
+    }
+
+    let Ok(session_entries) = fs::read_dir(&sessions_dir) else {
+        return false;
+    };
+    let session_names: Vec<String> = session_entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(|s| s.to_string()))
+        .collect();
+    if session_names.len() != 1 || session_names[0] != "sessions.json" {
+        return false;
+    }
+
+    is_empty_object_json_file(&sessions_dir.join("sessions.json"))
+}
+
 fn build_local_agents_snapshot() -> Vec<LocalAgentInfo> {
     let base_dir = data_dir();
     let hints = collect_agent_hints(&base_dir);
@@ -666,6 +737,19 @@ fn build_local_agents_snapshot() -> Vec<LocalAgentInfo> {
             if let Some(id) = path.file_name().and_then(|v| v.to_str()) {
                 let trimmed = id.trim();
                 if !trimmed.is_empty() {
+                    if trimmed != "main"
+                        && is_ghost_agent_dir(&path)
+                    {
+                        // 清理仅包含空 sessions.json 的幽灵目录，避免反复在 UI 中“复活”。
+                        if let Err(err) = fs::remove_dir_all(&path) {
+                            log::debug!(
+                                "跳过清理幽灵智能体目录失败 ({}): {}",
+                                path.to_string_lossy(),
+                                err
+                            );
+                        }
+                        continue;
+                    }
                     ids.insert(trimmed.to_string());
                 }
             }
@@ -688,6 +772,7 @@ fn build_local_agents_snapshot() -> Vec<LocalAgentInfo> {
     });
 
     for id in sorted_ids {
+        let has_agent_dir = base_dir.join("agents").join(&id).exists();
         let workspace_path = resolve_workspace_for_agent(
             &id,
             &base_dir,
@@ -695,6 +780,12 @@ fn build_local_agents_snapshot() -> Vec<LocalAgentInfo> {
             &workspace_dirs,
             &mut used_workspaces,
         );
+
+        // 过滤“仅来自历史备份配置”的幽灵智能体：
+        // 非 main 且没有实际目录/工作区时，不出现在本地智能体列表。
+        if id != "main" && !has_agent_dir && workspace_path.is_none() {
+            continue;
+        }
 
         let (name_from_identity, emoji_from_identity, _description) = workspace_path
             .as_ref()
@@ -852,4 +943,160 @@ pub async fn save_local_agent_workspace_file(
 
     let path = workspace.join(&safe_file_name);
     fs::write(path, content).map_err(|e| format!("写入文件失败: {}", e))
+}
+
+#[tauri::command]
+pub async fn delete_local_agent_data(agent_id: String) -> Result<LocalAgentDeleteResult, String> {
+    let safe_agent_id = agent_id.trim().to_string();
+    if safe_agent_id.is_empty() {
+        return Err("agent_id 不能为空".to_string());
+    }
+    if safe_agent_id == "main" {
+        return Err("不能删除默认智能体 main".to_string());
+    }
+    if !local_agent_id_is_safe(&safe_agent_id) {
+        return Err(format!("非法 agent_id: {}", safe_agent_id));
+    }
+
+    let base_dir = data_dir();
+    let mut candidate_paths: Vec<PathBuf> = vec![
+        base_dir.join("agents").join(&safe_agent_id),
+        base_dir.join(format!("workspace-{}", safe_agent_id)),
+    ];
+
+    if let Some(agent) = find_local_agent(&safe_agent_id) {
+        candidate_paths.push(PathBuf::from(agent.workspace));
+    }
+
+    let mut dedupe = HashSet::new();
+    candidate_paths.retain(|path| dedupe.insert(path.clone()));
+
+    let mut removed_paths = Vec::new();
+    let mut missing_paths = Vec::new();
+
+    for path in candidate_paths {
+        if !path.exists() {
+            missing_paths.push(path.to_string_lossy().to_string());
+            continue;
+        }
+
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|e| {
+                format!(
+                    "删除目录失败 ({}): {}",
+                    path.to_string_lossy(),
+                    e
+                )
+            })?;
+        } else {
+            fs::remove_file(&path).map_err(|e| {
+                format!(
+                    "删除文件失败 ({}): {}",
+                    path.to_string_lossy(),
+                    e
+                )
+            })?;
+        }
+
+        removed_paths.push(path.to_string_lossy().to_string());
+    }
+
+    Ok(LocalAgentDeleteResult {
+        agent_id: safe_agent_id,
+        removed_paths,
+        missing_paths,
+    })
+}
+
+#[tauri::command]
+pub async fn purge_local_session_key(session_key: String) -> Result<LocalSessionPurgeResult, String> {
+    let safe_session_key = session_key.trim().to_string();
+    if safe_session_key.is_empty() {
+        return Err("session_key 不能为空".to_string());
+    }
+
+    let agents_root = data_dir().join("agents");
+    if !agents_root.exists() {
+        return Ok(LocalSessionPurgeResult {
+            session_key: safe_session_key,
+            removed_count: 0,
+            touched_files: Vec::new(),
+            missing_files: Vec::new(),
+        });
+    }
+
+    let mut removed_count = 0usize;
+    let mut touched_files = Vec::new();
+    let mut missing_files = Vec::new();
+
+    let entries = fs::read_dir(&agents_root).map_err(|e| {
+        format!(
+            "读取 agents 目录失败 ({}): {}",
+            agents_root.to_string_lossy(),
+            e
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("遍历 agents 目录失败: {}", e))?;
+        let agent_path = entry.path();
+        if !agent_path.is_dir() {
+            continue;
+        }
+
+        let sessions_file = agent_path.join("sessions").join("sessions.json");
+        if !sessions_file.exists() {
+            missing_files.push(sessions_file.to_string_lossy().to_string());
+            continue;
+        }
+
+        let content = fs::read_to_string(&sessions_file).map_err(|e| {
+            format!(
+                "读取 sessions 文件失败 ({}): {}",
+                sessions_file.to_string_lossy(),
+                e
+            )
+        })?;
+
+        let mut payload: Value = serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "解析 sessions 文件失败 ({}): {}",
+                sessions_file.to_string_lossy(),
+                e
+            )
+        })?;
+
+        let mut changed = false;
+        if let Some(store) = payload.as_object_mut() {
+            if store.remove(&safe_session_key).is_some() {
+                removed_count += 1;
+                changed = true;
+            }
+        }
+
+        if changed {
+            let next = serde_json::to_string_pretty(&payload).map_err(|e| {
+                format!(
+                    "序列化 sessions 文件失败 ({}): {}",
+                    sessions_file.to_string_lossy(),
+                    e
+                )
+            })?;
+            fs::write(&sessions_file, next).map_err(|e| {
+                format!(
+                    "写入 sessions 文件失败 ({}): {}",
+                    sessions_file.to_string_lossy(),
+                    e
+                )
+            })?;
+            touched_files.push(sessions_file.to_string_lossy().to_string());
+        }
+    }
+
+    Ok(LocalSessionPurgeResult {
+        session_key: safe_session_key,
+        removed_count,
+        touched_files,
+        missing_files,
+    })
 }

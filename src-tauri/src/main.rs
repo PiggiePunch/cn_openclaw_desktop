@@ -75,6 +75,8 @@ pub fn run() {
             commands::config::load_local_agent_workspace,
             commands::config::read_local_agent_workspace_file,
             commands::config::save_local_agent_workspace_file,
+            commands::config::delete_local_agent_data,
+            commands::config::purge_local_session_key,
             // ========== 权限管理 ==========
             commands::permissions::check_permission,
             commands::permissions::request_permission,
