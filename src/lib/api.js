@@ -759,6 +759,16 @@ function sanitizeCronUpdatePatch(rawPatch) {
   return patch
 }
 
+function isMainAgentNotFoundError(input) {
+  const message = String(input || '').toLowerCase()
+  if (!message) return false
+  return (
+    message.includes('agent "main" not found') ||
+    message.includes("agent 'main' not found") ||
+    message.includes('main not found')
+  )
+}
+
 const KNOWN_AGENT_CACHE_TTL_MS = 10_000
 const SAFE_AGENT_ID_RE = /^[A-Za-z0-9_-]+$/
 let knownAgentIdsCache = null
@@ -1161,6 +1171,83 @@ async function cleanupInvalidChannelAgentBindings() {
     data: {
       removed,
       saved: true,
+    },
+  }
+}
+
+async function ensureMainAgentConfigured(options = {}) {
+  const desiredName = String(options.name || '默认助手').trim() || '默认助手'
+  const desiredEmoji = String(options.emoji || '🤖').trim() || '🤖'
+  const desiredAvatar = String(options.avatar || '').trim()
+  const workspacePath = '~/.openclaw/workspace'
+
+  let config = {}
+  const currentResult = await api.config.get()
+  if (currentResult.success && isPlainObject(currentResult.data)) {
+    config = cloneJsonObject(currentResult.data || {})
+  }
+
+  let changed = false
+  if (!isPlainObject(config.agents)) {
+    config.agents = {}
+    changed = true
+  }
+  if (!isPlainObject(config.agents.defaults)) {
+    config.agents.defaults = {}
+    changed = true
+  }
+  if (typeof config.agents.defaults.workspace !== 'string' || !config.agents.defaults.workspace.trim()) {
+    config.agents.defaults.workspace = workspacePath
+    changed = true
+  }
+
+  if (!Array.isArray(config.agents.list)) {
+    config.agents.list = []
+    changed = true
+  }
+  const hasMainInList = config.agents.list.some((item) => {
+    const id = String(item?.id || '').trim()
+    return id === 'main'
+  })
+  if (!hasMainInList) {
+    config.agents.list.push({
+      id: 'main',
+      workspace: workspacePath,
+      identity: {
+        name: desiredName,
+        emoji: desiredEmoji,
+        ...(desiredAvatar ? { avatar: desiredAvatar } : {}),
+      },
+    })
+    changed = true
+  }
+
+  if (changed) {
+    const saveResult = await api.config.set(config)
+    if (!saveResult.success) return saveResult
+  }
+
+  const identityContent = buildIdentityMarkdown(desiredName, desiredEmoji, desiredAvatar)
+  const savedLocal = await saveLocalWorkspaceFileFromTauri('main', 'IDENTITY.md', identityContent)
+  if (!savedLocal) {
+    await wrapGatewayCall(
+      'workspace.saveFile',
+      { agentId: 'main', fileName: 'IDENTITY.md', content: identityContent },
+      { silent: true },
+    )
+  } else {
+    await wrapGatewayCall(
+      'workspace.saveFile',
+      { agentId: 'main', fileName: 'IDENTITY.md', content: identityContent },
+      { silent: true },
+    )
+  }
+
+  return {
+    success: true,
+    data: {
+      ok: true,
+      changed,
     },
   }
 }
@@ -2086,6 +2173,21 @@ const api = {
       }
       return currentResult
     },
+    resetAllData: async () => {
+      if (!isTauriRuntime()) {
+        return { success: false, error: '仅桌面版支持重置全部数据' }
+      }
+
+      try {
+        await invokeTauri('reset_all_data')
+        return { success: true, data: { ok: true } }
+      } catch (error) {
+        return handleError(error, {
+          method: 'reset_all_data',
+          silent: true,
+        })
+      }
+    },
     // 兼容旧页面调用：当前版本配置通过 config.set 已落盘，Gateway 侧暂无独立 sync 方法
     syncToGateway: async () => ({ success: true, data: { synced: true } }),
     cleanupInvalidChannelAgentBindings: async () => cleanupInvalidChannelAgentBindings(),
@@ -2346,6 +2448,7 @@ const api = {
 
       return { success: true, data: list }
     },
+    ensureMainConfigured: async () => ensureMainAgentConfigured(),
     get: async (agentId) => {
       const result = await wrapGatewayCall('agents.get', { agentId }, { silent: true })
       if (result.success) return result
@@ -2647,7 +2750,15 @@ const api = {
         return { success: true, data: normalizeWorkspacePayload(localData, safeAgentId) }
       }
 
-      const result = await wrapGatewayCall('workspace.load', { agentId: safeAgentId }, { silent: true })
+      let result = await wrapGatewayCall('workspace.load', { agentId: safeAgentId }, { silent: true })
+      if (!result.success && safeAgentId === 'main' && isMainAgentNotFoundError(result.error)) {
+        await ensureMainAgentConfigured()
+        const localAfterFix = await loadLocalWorkspaceFromTauri('main')
+        if (localAfterFix) {
+          return { success: true, data: normalizeWorkspacePayload(localAfterFix, 'main') }
+        }
+        result = await wrapGatewayCall('workspace.load', { agentId: 'main' }, { silent: true })
+      }
       if (!result.success) {
         return result
       }
@@ -2833,8 +2944,21 @@ const api = {
   },
 
   // ========== 测试连接 ==========
-  testConnection: (provider, model, apiKey, baseUrl) =>
-    runProviderConnectivityTest(provider, model, apiKey, baseUrl),
+  testConnection: async (provider, model, apiKey, baseUrl) => {
+    // 如果没有传入 baseUrl，尝试从 Gateway 配置获取正确的地址
+    if (!baseUrl) {
+      try {
+        const cfg = await wrapGatewayCall('config.get', {})
+        if (cfg.success && cfg.data?.ai_provider?.[provider]?.base_url) {
+          baseUrl = cfg.data.ai_provider[provider].base_url
+          console.log(`[testConnection] 从 Gateway 配置读取到 baseUrl: ${baseUrl}`)
+        }
+      } catch (e) {
+        console.warn('[testConnection] 读取 Gateway 配置失败:', e)
+      }
+    }
+    return runProviderConnectivityTest(provider, model, apiKey, baseUrl)
+  },
 
   // ========== 系统相关 ==========
   // 注意：Gateway 没有 system.info 方法，使用 status 替代
@@ -2998,6 +3122,7 @@ const api = {
   identity: {
     get: (agentId) => wrapGatewayCall('agent.identity.get', { agentId }),
     update: async (agentId, params, emoji, avatar, _description) => {
+      const safeAgentId = String(agentId || 'main').trim() || 'main'
       let payload = {}
       if (params && typeof params === 'object' && !Array.isArray(params)) {
         payload = { ...params }
@@ -3010,11 +3135,21 @@ const api = {
       }
 
       const updatePayload = {
-        agentId: String(agentId || 'main'),
+        agentId: safeAgentId,
         ...(typeof payload?.name === 'string' && payload.name.trim() ? { name: payload.name.trim() } : {}),
         ...(typeof payload?.workspace === 'string' && payload.workspace.trim() ? { workspace: payload.workspace.trim() } : {}),
         ...(typeof payload?.model === 'string' && payload.model.trim() ? { model: payload.model.trim() } : {}),
         ...(typeof payload?.avatar === 'string' && payload.avatar.trim() ? { avatar: payload.avatar.trim() } : {}),
+      }
+
+      if (safeAgentId === 'main') {
+        const ensureResult = await ensureMainAgentConfigured({
+          name: updatePayload.name,
+          emoji: typeof payload?.emoji === 'string' ? payload.emoji.trim() : '',
+          avatar: updatePayload.avatar,
+        })
+        if (!ensureResult.success) return ensureResult
+        return { success: true, data: { ok: true, bootstrap: true } }
       }
 
       if (Object.keys(updatePayload).length > 1) {

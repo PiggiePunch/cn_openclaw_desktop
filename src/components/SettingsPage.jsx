@@ -36,6 +36,7 @@ import {
   Copy,
   BookOpen,
   Database,
+  Smartphone,
 } from 'lucide-react'
 
 import api from '@/lib/api'
@@ -148,6 +149,7 @@ function GatewaySettingsCard() {
   const statusInfo = getStatusInfo()
 
   return (
+    <>
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between">
@@ -236,6 +238,45 @@ function GatewaySettingsCard() {
         </p>
       </CardContent>
     </Card>
+
+    {/* 设备配对重置 */}
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="w-5 h-5" />
+          设备配对
+        </CardTitle>
+        <CardDescription>重新配对设备身份，解决认证失败问题</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="p-3 rounded-lg bg-yellow-50 border border-yellow-200 text-sm text-yellow-800">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-medium">如果遇到"认证失败"或"连接被拒绝"错误，请尝试重新配对</p>
+              <p className="text-xs mt-1 opacity-80">这将清除本地设备身份并重新向 Gateway 注册</p>
+            </div>
+          </div>
+        </div>
+        <Button
+          variant="outline"
+          onClick={async () => {
+            if (!confirm('确定要重新配对设备吗？这将清除本地设备身份并重新连接。')) {
+              return
+            }
+            // 清除设备身份和 token
+            localStorage.removeItem('openclaw-device-identity')
+            localStorage.removeItem('openclaw-gateway-token')
+            toast.success('已清除设备身份', '请刷新页面或重启 Gateway')
+          }}
+          className="w-full"
+        >
+          <RefreshCw className="w-4 h-4 mr-2" />
+          重新配对设备
+        </Button>
+      </CardContent>
+    </Card>
+    </>
   )
 }
 
@@ -1303,7 +1344,10 @@ export default function SettingsPage({
 
   const handleReset = async () => {
     try {
-      await api.config.resetAllData()
+      const result = await api.config.resetAllData()
+      if (!result?.success) {
+        throw new Error(result?.error || '重置系统失败')
+      }
       // 清理 localStorage
       Object.keys(localStorage)
         .filter(key => key.startsWith('openclaw_') || key.startsWith('agent_'))

@@ -158,13 +158,14 @@ export class OpenClawGateway {
 
         this.ws.onclose = (event) => {
           clearTimeout(connectTimeout)
-          console.log('[Gateway] WebSocket 关闭:', event.code, event.reason)
+          const closeReason = event.reason || ''
+          console.log('[Gateway] WebSocket 关闭:', event.code, closeReason)
           if (this.connectReject) {
-            this.connectReject(new Error(`连接关闭: ${event.code} ${event.reason}`))
+            this.connectReject(new Error(`连接关闭: ${event.code} ${closeReason}`))
             this.connectResolve = null
             this.connectReject = null
           }
-          this._handleDisconnect()
+          this._handleDisconnect(closeReason)
         }
       } catch (error) {
         this._setState(ConnectionState.DISCONNECTED)
@@ -315,8 +316,9 @@ export class OpenClawGateway {
 
   /**
    * 处理断开连接
+   * @param {string} [closeReason] - 关闭原因，用于检测认证失败
    */
-  _handleDisconnect() {
+  _handleDisconnect(closeReason) {
     this._stopHeartbeat()
     this._clearReconnectTimer()
 
@@ -327,6 +329,20 @@ export class OpenClawGateway {
     this.pendingRequests.clear()
 
     this._setState(ConnectionState.DISCONNECTED)
+
+    // 检测是否是认证失败导致的封禁，如果是则停止重连
+    const authFailed = closeReason?.includes('too many failed authentication attempts')
+    if (authFailed) {
+      console.warn('[Gateway] 检测到认证失败次数过多，停止重连。请在设置中重新配对设备。')
+      this.shouldReconnect = false
+      // 通知用户需要重新配对
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('gateway:authFailed', {
+          detail: { message: '认证失败次数过多，请重新配对设备' }
+        }))
+      }
+      return
+    }
 
     // 尝试重连
     if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {

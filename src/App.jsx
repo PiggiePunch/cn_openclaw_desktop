@@ -195,13 +195,15 @@ function App() {
 
   const runStartupRepair = async () => {
     try {
-      const [channelsResult, sessionsResult, cronResult] = await Promise.all([
+      const [mainResult, channelsResult, sessionsResult, cronResult] = await Promise.all([
+        api.agents.ensureMainConfigured(),
         api.config.cleanupInvalidChannelAgentBindings(),
         api.sessions.cleanupInvalidAgentReferences(),
         api.cron.repairInvalidAgentBindings({ disableInvalid: true }),
       ])
 
       console.log('🧹 启动修复完成:', {
+        mainEnsured: Boolean(mainResult?.success),
         channelsRemoved: channelsResult?.data?.removed || 0,
         sessionsRemoved: sessionsResult?.data?.removed || 0,
         cronFixed: cronResult?.data?.fixed || 0,

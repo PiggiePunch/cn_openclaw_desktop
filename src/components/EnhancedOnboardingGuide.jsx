@@ -248,11 +248,51 @@ export default function EnhancedOnboardingGuide({ onComplete }) {
     setIsStartingGateway(false)
   }
 
-  const handleTestConnection = async () => {
+  const handleTestConnection = async (autoSave = false) => {
     if (!apiKey || !selectedModel) {
       setTestResult({ success: false, message: '请填写 API Key 和模型名称' })
       return
     }
+
+    // 如果是自动保存模式（用户点击测试连接时），先保存配置
+    if (autoSave) {
+      setTestResult({ success: false, message: '正在保存配置...' })
+      try {
+        const cfgResult = await api.config.get()
+        const cfg = cfgResult.success ? cfgResult.data : {}
+
+        if (!cfg.ai_provider) cfg.ai_provider = {}
+        cfg.ai_provider.current = selectedProvider
+
+        if (!cfg.ai_provider[selectedProvider]) cfg.ai_provider[selectedProvider] = {}
+
+        cfg.ai_provider[selectedProvider].model = selectedModel
+        cfg.ai_provider[selectedProvider].custom_models = [selectedModel]
+        cfg.ai_provider[selectedProvider].enabled = true
+
+        if (apiKey.trim()) {
+          cfg.ai_provider[selectedProvider].api_key = apiKey.trim()
+        }
+
+        if (customBaseUrl.trim()) {
+          cfg.ai_provider[selectedProvider].base_url = customBaseUrl.trim()
+        } else {
+          const defaultUrl = getCurrentDefaultUrl()
+          if (defaultUrl) {
+            cfg.ai_provider[selectedProvider].base_url = defaultUrl
+          }
+        }
+
+        await api.config.set(cfg)
+        await api.config.syncToGateway()
+        setConfigSaved(true)
+      } catch (e) {
+        setTestResult({ success: false, message: '保存配置失败: ' + e.message })
+        setTestingConnection(false)
+        return
+      }
+    }
+
     setTestingConnection(true)
     setTestResult(null)
     const urlToUse = customBaseUrl.trim() || null
@@ -299,13 +339,15 @@ export default function EnhancedOnboardingGuide({ onComplete }) {
       setConfigSaved(true)
       setTestResult({ success: true, message: '配置已保存！' })
 
-      // 进入下一步
+      // 进入下一步 - 只有在用户已经选择了模式后才跳转
+      // 如果guideMode为null，则停留在当前页面让用户选择模式
       setTimeout(() => {
         if (guideMode === GUIDE_MODES.TEMPLATE) {
           setCurrentStep(ONBOARDING_STEPS.TEMPLATE)
-        } else {
+        } else if (guideMode === GUIDE_MODES.MANUAL) {
           setCurrentStep(ONBOARDING_STEPS.MANUAL)
         }
+        // guideMode为null时不跳转，让用户选择模式
       }, 800)
     } catch (e) {
       console.error('保存模型配置失败:', e)
@@ -604,7 +646,7 @@ export default function EnhancedOnboardingGuide({ onComplete }) {
         <Button
           variant="outline"
           size="sm"
-          onClick={handleTestConnection}
+          onClick={() => handleTestConnection(true)}
           disabled={testingConnection || !selectedModel || !apiKey}
           className="flex-1"
         >

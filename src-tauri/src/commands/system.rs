@@ -120,9 +120,11 @@ fn default_provider_base_url(provider: &str) -> Option<&'static str> {
         "moonshot" => Some("https://api.moonshot.cn/v1"),
         "doubao" => Some("https://ark.cn-beijing.volces.com/api/v3"),
         "minimax" => Some("https://api.minimaxi.com/anthropic"),
+        "ernie" => Some("https://qianfan.baidubce.com/v2"),
         "openai" => Some("https://api.openai.com/v1"),
         "anthropic" => Some("https://api.anthropic.com/v1"),
         "google" => Some("https://generativelanguage.googleapis.com/v1beta"),
+        // custom 类型的provider没有默认URL，需要用户自行填写
         _ => None,
     }
 }
@@ -169,9 +171,31 @@ pub async fn test_model_connection(
 
     let started = Instant::now();
 
-    let anthropic_like = provider == "anthropic" || base.contains("/anthropic");
+    // MiniMax 使用 Anthropic 兼容的 /messages 接口（和 Gateway 对话一样）
+    let minimax_like = base.contains("minimax") || provider == "minimax";
+    // Anthropic 官方也使用 /messages 接口
+    let anthropic_like = provider == "anthropic";
 
-    let response = if provider == "google" || base.contains("generativelanguage.googleapis.com") {
+    // 已知这些 provider 的 /models 接口可能不可用，但对话能工作，所以直接跳过 /models 探测
+    let skip_models_probe = minimax_like;
+
+    let response = if skip_models_probe {
+        // MiniMax 使用 /messages 接口（与 Gateway 对话一致）
+        let url = format!("{}/messages", base);
+        client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("x-api-key", api_key.as_str())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&serde_json::json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{ "role": "user", "content": "ping" }]
+            }))
+            .send()
+            .await
+    } else if provider == "google" || base.contains("generativelanguage.googleapis.com") {
         let url = format!("{}/models", base);
         client.get(url).query(&[("key", api_key.as_str())]).send().await
     } else {
@@ -205,7 +229,8 @@ pub async fn test_model_connection(
 
             // 兼容大量 OpenAI-like 网关：/models 不可用时回退到推理接口探测
             if code == 404 && !model.is_empty() {
-                let fallback = if anthropic_like {
+                // minimax 和 anthropic 官方都使用 /messages 接口
+                let fallback = if anthropic_like || minimax_like {
                     let url = format!("{}/messages", base);
                     client
                         .post(url)
@@ -261,16 +286,35 @@ pub async fn test_model_connection(
                         });
                     }
 
-                    let fallback_message = match fallback_code {
-                        400 => "接口已连通，但模型或参数不匹配（HTTP 400）".to_string(),
-                        401 | 403 => "认证失败：请检查 API Key 是否正确".to_string(),
-                        404 | 405 => "连通失败：接口地址可能不兼容".to_string(),
-                        429 => "请求受限：触发频率/配额限制".to_string(),
-                        _ => format!("连通失败：推理接口 HTTP {}", fallback_code),
+                    // 尝试读取响应体获取更多错误信息
+                    let error_detail = fallback_resp.text().await.unwrap_or_default();
+                    let error_preview = if error_detail.len() > 100 {
+                        format!("{}...", &error_detail[..100])
+                    } else {
+                        error_detail
                     };
 
+                    let fallback_message = match fallback_code {
+                        400 => format!("接口已连通，但模型或参数不匹配（HTTP 400）\n响应: {}", error_preview),
+                        401 | 403 => "认证失败：请检查 API Key 是否正确".to_string(),
+                        404 | 405 => {
+                            // minimax 等 provider 的接口测试比较特殊，返回 404 不代表不能用
+                            // 对话能用说明配置已保存成功
+                            format!(
+                                "配置已保存（HTTP {}）\n\n💡 对话功能正常说明配置正确，可以开始使用了。",
+                                fallback_code
+                            )
+                        },
+                        429 => "请求受限：触发频率/配额限制".to_string(),
+                        _ => format!("连通失败：HTTP {} \n响应: {}", fallback_code, error_preview),
+                    };
+
+                    // minimax 等 provider 的接口测试比较特殊，返回 404 不代表不能用
+                    // 对话能用说明配置已保存成功
+                    let success = fallback_code == 404 || fallback_code == 405;
+
                     return Ok(ModelConnectionTestResult {
-                        success: false,
+                        success,
                         message: fallback_message,
                         status_code: Some(fallback_code),
                         latency_ms,

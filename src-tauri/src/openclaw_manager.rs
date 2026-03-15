@@ -143,9 +143,41 @@ impl OpenClawManager {
         Some(first_line.to_string())
     }
 
-    /// 检查是否已安装
+    /// 检查是否已安装或是否有用户数据
+    /// - 如果用户有 openclaw.json 配置或有核心代码，就算"已安装/有数据"
     pub async fn is_installed(&self) -> bool {
-        Self::find_system_openclaw_path().is_some() || self.is_core_installed()
+        // 1. 检查系统命令
+        if Self::find_system_openclaw_path().is_some() {
+            return true;
+        }
+
+        // 2. 检查核心代码是否已安装
+        if self.is_core_installed() {
+            return true;
+        }
+
+        // 3. 检查用户是否有数据（配置文件存在）
+        // ~/.openclaw/openclaw.json 存在说明用户之前用过
+        let config_file = paths::openclaw_config_file();
+        if config_file.exists() {
+            log::info!("检测到用户已有 OpenClaw 数据: {:?}", config_file);
+            return true;
+        }
+
+        // 4. 检查是否有其他用户数据（sessions, agents 等目录）
+        let data_dir = paths::data_dir();
+        if data_dir.exists() {
+            // 检查常见的用户数据目录
+            let user_data_indicators = ["sessions", "agents", "memory", "skills"];
+            for indicator in user_data_indicators {
+                if data_dir.join(indicator).exists() {
+                    log::info!("检测到用户已有数据目录: {}", indicator);
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     /// 获取当前安装的版本
@@ -282,18 +314,38 @@ impl OpenClawManager {
         // 1. 创建安装目录
         fs::create_dir_all(&self.install_dir).await?;
 
-        // 2. 使用 git clone 下载
-        println!("⬇️  克隆 OpenClaw 仓库...");
-        let output = std::process::Command::new("git")
-            .args(["clone", "https://github.com/openclaw/openclaw.git", "."])
-            .current_dir(&self.install_dir)
-            .output()?;
+        // 2. 如果已有 git 仓库则更新；否则在空目录中 clone
+        let git_dir = self.install_dir.join(".git");
+        if git_dir.exists() {
+            println!("🔄 检测到已有仓库，执行 git pull 更新...");
+            let output = std::process::Command::new("git")
+                .args(["pull", "--ff-only"])
+                .current_dir(&self.install_dir)
+                .output()?;
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "Git pull 失败: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        } else {
+            if self.dir_has_entries(&self.install_dir).await? {
+                println!("🧹 安装目录非空，先清理后再执行 git clone...");
+                self.clear_dir_contents(&self.install_dir).await?;
+            }
 
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Git clone 失败: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+            println!("⬇️  克隆 OpenClaw 仓库...");
+            let output = std::process::Command::new("git")
+                .args(["clone", "https://github.com/openclaw/openclaw.git", "."])
+                .current_dir(&self.install_dir)
+                .output()?;
+
+            if !output.status.success() {
+                return Err(anyhow::anyhow!(
+                    "Git clone 失败: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
         }
 
         // 3. 安装依赖
@@ -330,6 +382,25 @@ impl OpenClawManager {
 
         println!("✅ OpenClaw 安装完成!");
         Ok(status)
+    }
+
+    async fn dir_has_entries(&self, dir: &PathBuf) -> Result<bool> {
+        let mut entries = fs::read_dir(dir).await?;
+        Ok(entries.next_entry().await?.is_some())
+    }
+
+    async fn clear_dir_contents(&self, dir: &PathBuf) -> Result<()> {
+        let mut entries = fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = entry.metadata().await?;
+            if metadata.is_dir() {
+                fs::remove_dir_all(&path).await?;
+            } else {
+                fs::remove_file(&path).await?;
+            }
+        }
+        Ok(())
     }
 
     /// 查找适合当前平台的资源
