@@ -10,8 +10,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:build:debug": "tauri build --debug",
-    "postinstall": "node scripts/download-openclaw.js",
-    "download:openclaw": "node scripts/download-openclaw.js"
+    "postinstall": "echo 'Skipping OpenClaw download'",
+    "download:openclaw": "node scripts/download-openclaw.cjs"
   },
   "openclaw": {
     "version": "1.0.0",

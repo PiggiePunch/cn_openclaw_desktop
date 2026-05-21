@@ -329,9 +329,10 @@ export default function ModelsManager() {
    * 格式化上下文窗口
    */
   const formatContextWindow = (tokens) => {
+    if (!tokens) return '未知'
     if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
     if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
-    return tokens.toString()
+    return String(tokens)
   }
 
   /**
