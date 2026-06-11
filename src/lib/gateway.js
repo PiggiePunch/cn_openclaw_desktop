@@ -249,8 +249,8 @@ export class OpenClawGateway {
           id,
           method: 'connect',
           params: {
-            minProtocol: 3,
-            maxProtocol: 3,
+            minProtocol: 4,
+            maxProtocol: 4,
             client: this.clientInfo,
             role: 'operator',
             scopes: ['operator.admin', 'operator.approvals', 'operator.pairing'],

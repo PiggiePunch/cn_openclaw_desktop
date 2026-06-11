@@ -3,7 +3,7 @@
  *
  * 功能：
  * - 连接到 ws://127.0.0.1:18789
- * - 协议版本 3
+ * - 协议版本 4
  * - 支持 req/res/event 帧格式
  * - Token 认证
  */
@@ -12,7 +12,7 @@ import { toast } from '@/hooks/useToast';
 
 // WebSocket 连接配置
 const GATEWAY_URL = 'ws://127.0.0.1:18789';
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
